@@ -110,6 +110,7 @@ Item {
       Text {
         width: parent.width
         text: "Scratchpad"
+        textFormat: Text.PlainText
         color: Color.popups.text
         font.family: Style.font.family
         font.pixelSize: Style.font.title
@@ -120,6 +121,7 @@ Item {
       Text {
         width: parent.width
         text: "Click to start an app you kept here. Right-click to forget."
+        textFormat: Text.PlainText
         color: Util.alpha(Color.popups.text, 0.7)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -167,6 +169,7 @@ Item {
                   anchors.centerIn: parent
                   visible: parent.children[0].status !== Image.Ready
                   text: modelData.glyph || "󰣆"
+                  textFormat: Text.PlainText
                   color: Color.popups.text
                   font.family: Style.font.family
                   font.pixelSize: Style.font.display
@@ -176,6 +179,7 @@ Item {
               Text {
                 width: parent.width
                 text: modelData.name || "App"
+                textFormat: Text.PlainText
                 color: Color.popups.text
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
@@ -187,6 +191,7 @@ Item {
               Text {
                 width: parent.width
                 text: "Start"
+                textFormat: Text.PlainText
                 color: Util.alpha(Color.popups.text, 0.55)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
@@ -202,7 +207,7 @@ Item {
               onClicked: function(mouse) {
                 if (mouse.button === Qt.RightButton)
                   root.forgetApp(modelData.id || modelData.class)
-                else
+                else if (modelData.command)
                   root.launchApp(modelData.id || modelData.class)
               }
             }

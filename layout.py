@@ -107,6 +107,42 @@ def resolve_icon(name: str) -> str:
   return ""
 
 
+HTTPS_URL = re.compile(
+  r"^https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?(?:/[A-Za-z0-9._~/-]*)?$"
+)
+DESKTOP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+TUI_SLUG = re.compile(r"^[a-z][a-z0-9-]*$")
+SAFE_EXACT_COMMANDS = {
+  "omarchy-agent",
+  "omarchy-launch-terminal",
+  "uwsm-app -- obsidian",
+}
+
+
+def sanitize_name(value: str) -> str:
+  cleaned = "".join(ch for ch in str(value or "") if ch.isprintable() and ch not in "<>")
+  cleaned = " ".join(cleaned.split())
+  return cleaned[:80] if cleaned else "App"
+
+
+def is_https_url(value: str) -> bool:
+  return bool(HTTPS_URL.fullmatch(value or ""))
+
+
+def is_safe_command(command: str) -> bool:
+  command = str(command or "").strip()
+  if command in SAFE_EXACT_COMMANDS:
+    return True
+  if command.startswith("omarchy-launch-tui "):
+    slug = command.split(" ", 1)[1]
+    return bool(TUI_SLUG.fullmatch(slug))
+  if command.startswith("omarchy-launch-webapp "):
+    return is_https_url(command.split(" ", 1)[1])
+  if command.startswith("gtk-launch "):
+    return bool(DESKTOP_ID.fullmatch(command.split(" ", 1)[1]))
+  return False
+
+
 def webapp_url_from_class(cls: str) -> str | None:
   if not cls.startswith("chrome-") or not cls.endswith("-Default"):
     return None
@@ -117,14 +153,11 @@ def webapp_url_from_class(cls: str) -> str | None:
     return None
   if "://" not in path:
     path = "https://" + path
-  return path
+  return path if is_https_url(path) else None
 
 
-def wrap_command(command: str) -> str:
-  command = command.strip()
-  if command.startswith(("uwsm-app ", "omarchy-", "gtk-launch ")):
-    return command
-  return "uwsm-app -- " + command
+def gtk_launch(desktop_id: str) -> str:
+  return "gtk-launch " + desktop_id if DESKTOP_ID.fullmatch(desktop_id) else ""
 
 
 def command_for_client(client: dict[str, Any], desktops: list[dict[str, str]]) -> tuple[str, str, str]:
@@ -135,10 +168,9 @@ def command_for_client(client: dict[str, Any], desktops: list[dict[str, str]]) -
   if url:
     host = url.split("/")[2]
     for entry in desktops:
-      exec_line = entry["exec"]
-      if "omarchy-launch-webapp" in exec_line and host in exec_line:
-        return entry["name"], exec_line.split("%")[0].strip(), entry["icon"]
-    return host, "omarchy-launch-webapp " + url, "chromium"
+      if "omarchy-launch-webapp" in entry["exec"] and host in entry["exec"]:
+        return sanitize_name(entry["name"] or host), "omarchy-launch-webapp " + url, entry["icon"]
+    return sanitize_name(host), "omarchy-launch-webapp " + url, "chromium"
 
   if cls.startswith("org.omarchy."):
     slug = cls.split(".")[-1]
@@ -146,7 +178,9 @@ def command_for_client(client: dict[str, Any], desktops: list[dict[str, str]]) -
       return "Agent", "omarchy-agent", "utilities-terminal"
     if slug == "btop":
       return "Activity", "omarchy-launch-tui btop", "utilities-system-monitor"
-    return slug, "omarchy-launch-tui " + slug, "utilities-terminal"
+    if TUI_SLUG.fullmatch(slug):
+      return sanitize_name(slug), "omarchy-launch-tui " + slug, "utilities-terminal"
+    return sanitize_name(title or slug or cls), "", ""
 
   if "obsidian" in lowered:
     return "Obsidian", "uwsm-app -- obsidian", "obsidian"
@@ -157,12 +191,16 @@ def command_for_client(client: dict[str, Any], desktops: list[dict[str, str]]) -
   for entry in desktops:
     wm = entry["wmclass"].lower()
     stem = entry["id"].lower()
+    command = gtk_launch(entry["id"])
+    if not command:
+      continue
     if wm and wm == cls_lower:
-      return entry["name"] or title, wrap_command(entry["exec"].split("%")[0]), entry["icon"]
+      return sanitize_name(entry["name"] or title), command, entry["icon"]
     if not wm and stem and stem == cls_lower:
-      return entry["name"] or title, wrap_command(entry["exec"].split("%")[0]), entry["icon"]
+      return sanitize_name(entry["name"] or title), command, entry["icon"]
 
-  return title or cls or "App", wrap_command(cls), cls
+  # Never treat a Hyprland window class as a shell command.
+  return sanitize_name(title or cls), "", ""
 
 
 def glyph_for(name: str, cls: str, command: str) -> str:
@@ -479,8 +517,8 @@ def launch(app_id: str) -> int:
     print(f"unknown scratchpad app: {app_id}", file=sys.stderr)
     return 1
   command = str(app.get("command") or "").strip()
-  if not command:
-    print(f"no command for {app_id}", file=sys.stderr)
+  if not command or not is_safe_command(command):
+    print(f"no trusted command for {app_id}", file=sys.stderr)
     return 1
   cls = str(app.get("class") or "")
   known_addrs = {str(client.get("address") or "") for client in clients() if client.get("address")}

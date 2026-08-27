@@ -29,6 +29,8 @@ No snapshot command. The plugin watches `special:scratchpad`:
   workspace forgets it. The scratchpad is only for what you keep there.
 - **Restore** — left-click a tile to launch that app back onto the
   scratchpad at the saved size and position. Right-click removes the tile.
+  Only apps matched to a desktop entry or a known Omarchy launcher can be
+  restarted; a raw window class is never used as a command.
 
 Requires **Omarchy 4** (Quattro) and Python 3. The helper uses only the
 standard library plus `hyprctl`.

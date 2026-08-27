@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ianm.scratchpad",
   "name": "Scratchpad placeholders",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Ian McMurray",
   "license": "MIT",
   "description": "Remember scratchpad apps across reboots and restore them as clickable placeholders. Click a tile to relaunch the app on the scratchpad in the same size and position.",
