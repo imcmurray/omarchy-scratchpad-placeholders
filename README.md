@@ -16,16 +16,14 @@ standard library plus `hyprctl`.
 
 ## Install
 
-From this checkout:
+```sh
+omarchy plugin add https://github.com/imcmurray/omarchy-scratchpad-placeholders.git --enable
+```
+
+From a local checkout:
 
 ```sh
 omarchy plugin add /home/ianm/Development/omarchy-scratchpad-placeholders --enable
-```
-
-After the repo is on GitHub:
-
-```sh
-omarchy plugin add https://github.com/<you>/omarchy-scratchpad-placeholders.git --enable
 ```
 
 Then rescan if the overlay does not appear:
@@ -64,7 +62,7 @@ rm -f ~/.local/state/omarchy/scratchpad-tracker.json
 ## Develop
 
 ```sh
-omarchy plugin validate /home/ianm/Development/omarchy-scratchpad-placeholders
+omarchy plugin validate .
 ```
 
 The overlay entry point is `Main.qml`. Layout tracking and launch live in
