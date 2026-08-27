@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -17,29 +19,157 @@ CONFIG_PATH = Path.home() / ".config/omarchy/scratchpad.json"
 STATE_PATH = Path.home() / ".local/state/omarchy/scratchpad-tracker.json"
 PLUGIN_DIR = Path(__file__).resolve().parent
 
+HYPRCTL_TIMEOUT_SEC = 3
+HYPRCTL_MAX_BYTES = 1_048_576
+DISPATCH_MAX_BYTES = 4096
+CONFIG_MAX_BYTES = 262_144
+STATE_MAX_BYTES = 65_536
+STATUS_MAX_BYTES = 65_536
+MAX_APPS = 32
+MAX_TRACKED = 64
+MAX_DESKTOP_FILES = 400
+MAX_DESKTOP_FILE_BYTES = 32_768
+MAX_DESKTOP_TOTAL_BYTES = 1_048_576
+DESKTOP_SCAN_SEC = 1.5
+
+
+def run_hyprctl(args: list[str], timeout: float = HYPRCTL_TIMEOUT_SEC, max_bytes: int = HYPRCTL_MAX_BYTES) -> bytes | None:
+  try:
+    result = subprocess.run(
+      ["hyprctl", *args],
+      capture_output=True,
+      timeout=timeout,
+      check=False,
+    )
+  except (OSError, subprocess.TimeoutExpired):
+    return None
+  stdout = result.stdout or b""
+  stderr = result.stderr or b""
+  if len(stdout) > max_bytes or len(stderr) > max_bytes:
+    return None
+  if result.returncode != 0:
+    return None
+  return stdout
+
 
 def hyprctl_json(args: list[str]) -> Any:
-  result = subprocess.run(["hyprctl", "-j", *args], check=False, capture_output=True, text=True)
-  if result.returncode != 0 or not result.stdout.strip():
+  raw = run_hyprctl(["-j", *args])
+  if not raw or not raw.strip():
     return None
   try:
-    return json.loads(result.stdout)
+    return json.loads(raw.decode("utf-8"))
+  except (UnicodeDecodeError, json.JSONDecodeError):
+    return None
+
+
+def read_regular_file(path: Path, max_bytes: int) -> str | None:
+  flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+  if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+  try:
+    fd = os.open(path, flags)
+  except OSError:
+    return None
+  try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+      return None
+    chunks: list[bytes] = []
+    total = 0
+    while total <= max_bytes:
+      try:
+        chunk = os.read(fd, min(8192, max_bytes - total + 1))
+      except BlockingIOError:
+        break
+      if not chunk:
+        break
+      total += len(chunk)
+      if total > max_bytes:
+        return None
+      chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+  except OSError:
+    return None
+  finally:
+    os.close(fd)
+
+
+def load_json(path: Path, fallback: Any, max_bytes: int = CONFIG_MAX_BYTES) -> Any:
+  raw = read_regular_file(path, max_bytes)
+  if raw is None or not raw.strip():
+    return fallback
+  try:
+    return json.loads(raw)
   except json.JSONDecodeError:
-    return None
-
-
-def load_json(path: Path, fallback: Any) -> Any:
-  try:
-    return json.loads(path.read_text(encoding="utf-8"))
-  except Exception:
     return fallback
 
 
-def write_json(path: Path, payload: Any) -> None:
-  path.parent.mkdir(parents=True, exist_ok=True)
-  tmp = path.with_suffix(path.suffix + ".tmp")
-  tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-  tmp.replace(path)
+def ensure_parent(path: Path) -> bool:
+  parent = path.parent
+  try:
+    if parent.exists():
+      return (not parent.is_symlink()) and parent.is_dir()
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return (not parent.is_symlink()) and parent.is_dir()
+  except OSError:
+    return False
+
+
+def write_json(path: Path, payload: Any, max_bytes: int = CONFIG_MAX_BYTES) -> None:
+  encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+  if len(encoded) > max_bytes or not ensure_parent(path):
+    return
+  fd = -1
+  tmp: str | None = None
+  try:
+    fd, tmp = tempfile.mkstemp(prefix=".scratchpad-", suffix=".tmp", dir=str(path.parent))
+    if Path(tmp).is_symlink():
+      raise OSError("temporary path is a symlink")
+    os.fchmod(fd, 0o600)
+    view = memoryview(encoded)
+    written = 0
+    while written < len(encoded):
+      n = os.write(fd, view[written:])
+      if n <= 0:
+        raise OSError("short write")
+      written += n
+    os.fsync(fd)
+    os.close(fd)
+    fd = -1
+    os.replace(tmp, path)
+    tmp = None
+    try:
+      os.chmod(path, 0o600, follow_symlinks=False)
+    except (NotImplementedError, TypeError, OSError):
+      os.chmod(path, 0o600)
+  except OSError:
+    if fd >= 0:
+      try:
+        os.close(fd)
+      except OSError:
+        pass
+    if tmp:
+      try:
+        os.unlink(tmp)
+      except OSError:
+        pass
+
+
+def dump_status(payload: Any) -> str:
+  text = json.dumps(payload, separators=(",", ":"))
+  if len(text.encode("utf-8")) <= STATUS_MAX_BYTES:
+    return text
+  if isinstance(payload, dict):
+    trimmed = {
+      "visible": bool(payload.get("visible")),
+      "liveCount": int(payload.get("liveCount") or 0),
+      "placeholders": list(payload.get("placeholders") or [])[:8],
+      "apps": list(payload.get("apps") or [])[:8],
+    }
+    text = json.dumps(trimmed, separators=(",", ":"))
+    if len(text.encode("utf-8")) <= STATUS_MAX_BYTES:
+      return text
+  return '{"visible":false,"liveCount":0,"placeholders":[],"apps":[]}'
 
 
 def desktop_entries() -> list[dict[str, str]]:
@@ -48,34 +178,53 @@ def desktop_entries() -> list[dict[str, str]]:
     Path("/usr/share/applications"),
   ]
   entries: list[dict[str, str]] = []
+  total_bytes = 0
+  deadline = time.monotonic() + DESKTOP_SCAN_SEC
   for directory in dirs:
-    if not directory.is_dir():
-      continue
-    for path in directory.glob("*.desktop"):
-      name = ""
-      icon = ""
-      exec_line = ""
-      wmclass = ""
-      try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-          if line.startswith("Name=") and not name:
-            name = line.split("=", 1)[1].strip()
-          elif line.startswith("Icon="):
-            icon = line.split("=", 1)[1].strip()
-          elif line.startswith("Exec="):
-            exec_line = line.split("=", 1)[1].strip()
-          elif line.startswith("StartupWMClass="):
-            wmclass = line.split("=", 1)[1].strip()
-      except OSError:
+    if time.monotonic() > deadline or len(entries) >= MAX_DESKTOP_FILES:
+      break
+    try:
+      if directory.is_symlink() or not directory.is_dir():
         continue
-      entries.append({
-        "id": path.stem,
-        "name": name or path.stem,
-        "icon": icon,
-        "exec": exec_line,
-        "wmclass": wmclass,
-        "path": str(path),
-      })
+      with os.scandir(directory) as listing:
+        for entry in listing:
+          if time.monotonic() > deadline or len(entries) >= MAX_DESKTOP_FILES:
+            break
+          if not entry.name.endswith(".desktop"):
+            continue
+          if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            continue
+          path = Path(entry.path)
+          raw = read_regular_file(path, MAX_DESKTOP_FILE_BYTES)
+          if raw is None:
+            continue
+          encoded_len = len(raw.encode("utf-8"))
+          if total_bytes + encoded_len > MAX_DESKTOP_TOTAL_BYTES:
+            return entries
+          total_bytes += encoded_len
+          name = ""
+          icon = ""
+          exec_line = ""
+          wmclass = ""
+          for line in raw.splitlines():
+            if line.startswith("Name=") and not name:
+              name = line.split("=", 1)[1].strip()
+            elif line.startswith("Icon="):
+              icon = line.split("=", 1)[1].strip()
+            elif line.startswith("Exec="):
+              exec_line = line.split("=", 1)[1].strip()
+            elif line.startswith("StartupWMClass="):
+              wmclass = line.split("=", 1)[1].strip()
+          entries.append({
+            "id": path.stem[:80],
+            "name": name or path.stem,
+            "icon": icon,
+            "exec": exec_line,
+            "wmclass": wmclass,
+            "path": str(path),
+          })
+    except OSError:
+      continue
   return entries
 
 
@@ -318,23 +467,42 @@ def scratchpad_visible() -> bool:
 
 
 def remembered() -> list[dict[str, Any]]:
-  data = load_json(CONFIG_PATH, {})
+  data = load_json(CONFIG_PATH, {}, CONFIG_MAX_BYTES)
   apps = data.get("apps") if isinstance(data, dict) else None
-  return [app for app in apps or [] if isinstance(app, dict) and app.get("class")]
+  out: list[dict[str, Any]] = []
+  for app in apps or []:
+    if not isinstance(app, dict) or not app.get("class"):
+      continue
+    out.append(app)
+    if len(out) >= MAX_APPS:
+      break
+  return out
 
 
 def save_remembered(apps: list[dict[str, Any]]) -> None:
-  write_json(CONFIG_PATH, {"apps": apps, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S")})
+  write_json(
+    CONFIG_PATH,
+    {"apps": apps[:MAX_APPS], "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S")},
+    CONFIG_MAX_BYTES,
+  )
 
 
 def tracker() -> dict[str, str]:
-  data = load_json(STATE_PATH, {})
+  data = load_json(STATE_PATH, {}, STATE_MAX_BYTES)
   last = data.get("addresses") if isinstance(data, dict) else None
-  return last if isinstance(last, dict) else {}
+  if not isinstance(last, dict):
+    return {}
+  out: dict[str, str] = {}
+  for key, value in last.items():
+    out[str(key)[:128]] = str(value)[:128]
+    if len(out) >= MAX_TRACKED:
+      break
+  return out
 
 
 def save_tracker(addresses: dict[str, str]) -> None:
-  write_json(STATE_PATH, {"addresses": addresses})
+  trimmed = dict(list(addresses.items())[:MAX_TRACKED])
+  write_json(STATE_PATH, {"addresses": trimmed}, STATE_MAX_BYTES)
 
 
 def sync() -> dict[str, Any]:
@@ -352,7 +520,7 @@ def sync() -> dict[str, Any]:
     existing = next((app for app in apps if app.get("class") == incoming["class"]), None)
     if existing:
       merge_app(existing, incoming)
-    else:
+    elif len(apps) < MAX_APPS:
       apps.append(incoming)
 
   for addr, cls in last.items():
@@ -372,14 +540,14 @@ def sync() -> dict[str, Any]:
     cls = str(app.get("class") or "")
     if cls in remaining:
       remaining.remove(cls)
-    else:
+    elif len(placeholders) < MAX_APPS:
       placeholders.append(app)
 
   return {
     "visible": scratchpad_visible(),
     "liveCount": len(live),
-    "placeholders": placeholders,
-    "apps": apps,
+    "placeholders": placeholders[:MAX_APPS],
+    "apps": apps[:MAX_APPS],
   }
 
 
@@ -390,7 +558,7 @@ def snapshot() -> dict[str, Any]:
   seen = set()
   for client in live:
     app = app_from_client(client, desktops)
-    if app["class"] in seen:
+    if app["class"] in seen or len(apps) >= MAX_APPS:
       continue
     seen.add(app["class"])
     apps.append(app)
@@ -404,9 +572,9 @@ def lua_str(value: str) -> str:
 
 
 def dispatch(lua: str) -> bool:
-  result = subprocess.run(["hyprctl", "dispatch", lua], check=False, capture_output=True, text=True)
-  if result.returncode != 0:
-    sys.stderr.write(result.stderr or result.stdout or f"dispatch failed: {lua}\n")
+  raw = run_hyprctl(["dispatch", lua], max_bytes=DISPATCH_MAX_BYTES)
+  if raw is None:
+    sys.stderr.write("dispatch failed\n")
     return False
   return True
 
@@ -539,10 +707,10 @@ def forget(app_id: str) -> int:
 def main() -> int:
   action = sys.argv[1] if len(sys.argv) > 1 else "status"
   if action in {"status", "sync"}:
-    print(json.dumps(sync(), separators=(",", ":")))
+    print(dump_status(sync()))
     return 0
   if action == "snapshot":
-    print(json.dumps(snapshot(), indent=2))
+    print(dump_status(snapshot()))
     return 0
   if action == "launch" and len(sys.argv) > 2:
     return launch(sys.argv[2])
