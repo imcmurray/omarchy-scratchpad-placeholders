@@ -12,6 +12,8 @@ position. Right-click forgets it.
 This is not a notes pad and not a bar occupancy indicator. It restores the
 apps you actually kept on the Hyprland scratchpad.
 
+![Scratchpad placeholder tiles for GitLab, Terminal, Obsidian, and Activity](preview.png)
+
 ## How it remembers
 
 No snapshot command. The plugin watches `special:scratchpad`:
