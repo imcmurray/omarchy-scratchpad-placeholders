@@ -6,7 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import select
+import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -34,8 +35,10 @@ MAX_DESKTOP_TOTAL_BYTES = 1_048_576
 DESKTOP_SCAN_SEC = 1.5
 
 
-def _stop_process(proc: subprocess.Popen[bytes]) -> None:
-  if proc.poll() is None:
+def _kill_process_group(proc: subprocess.Popen[bytes]) -> None:
+  try:
+    os.killpg(proc.pid, signal.SIGKILL)
+  except (ProcessLookupError, PermissionError, OSError):
     try:
       proc.kill()
     except OSError:
@@ -54,79 +57,68 @@ def run_hyprctl(args: list[str], timeout: float = HYPRCTL_TIMEOUT_SEC, max_bytes
   try:
     proc = subprocess.Popen(
       ["hyprctl", *args],
+      stdin=subprocess.DEVNULL,
       stdout=subprocess.PIPE,
       stderr=subprocess.PIPE,
       close_fds=True,
+      start_new_session=True,
     )
   except OSError:
     return None
+  if proc.stdout is None or proc.stderr is None:
+    _kill_process_group(proc)
+    return None
+
   stdout = bytearray()
   stderr = bytearray()
-  streams: dict[int, tuple[Any, bytearray]] = {}
-  if proc.stdout is not None:
-    os.set_blocking(proc.stdout.fileno(), False)
-    streams[proc.stdout.fileno()] = (proc.stdout, stdout)
-  if proc.stderr is not None:
-    os.set_blocking(proc.stderr.fileno(), False)
-    streams[proc.stderr.fileno()] = (proc.stderr, stderr)
-
   deadline = time.monotonic() + timeout
-  exceeded = False
+  overflowed = False
   try:
-    while streams:
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ, stdout)
+    selector.register(proc.stderr, selectors.EVENT_READ, stderr)
+    while selector.get_map():
       remaining = deadline - time.monotonic()
       if remaining <= 0:
-        exceeded = True
+        overflowed = True
         break
-      try:
-        ready, _, _ = select.select(list(streams), [], [], remaining)
-      except (OSError, ValueError):
-        break
-      if not ready:
-        if proc.poll() is None:
-          continue
-        ready = list(streams)
-      for fd in list(ready):
-        handle = streams.get(fd)
-        if handle is None:
-          continue
-        stream, buf = handle
+      for key, _ in selector.select(timeout=min(remaining, 0.25)):
+        buf: bytearray = key.data
         try:
-          chunk = os.read(fd, 8192)
-        except BlockingIOError:
-          continue
+          chunk = os.read(key.fd, 4096)
         except OSError:
-          stream.close()
-          streams.pop(fd, None)
-          continue
+          chunk = b""
         if not chunk:
-          stream.close()
-          streams.pop(fd, None)
+          selector.unregister(key.fileobj)
+          key.fileobj.close()
           continue
-        buf.extend(chunk)
-        if len(stdout) > max_bytes or len(stderr) > max_bytes or (len(stdout) + len(stderr)) > max_bytes:
-          exceeded = True
+        if len(buf) + len(chunk) > max_bytes or len(stdout) + len(stderr) + len(chunk) > max_bytes:
+          overflowed = True
           break
-      if exceeded:
+        buf.extend(chunk)
+      if overflowed:
         break
+    if overflowed:
+      _kill_process_group(proc)
+      return None
+    remaining = deadline - time.monotonic()
+    try:
+      code = proc.wait(timeout=max(remaining, 0.1))
+    except subprocess.TimeoutExpired:
+      _kill_process_group(proc)
+      return None
+    if code != 0:
+      return None
+    return bytes(stdout)
+  except OSError:
+    _kill_process_group(proc)
+    return None
   finally:
-    for fd, (stream, _) in list(streams.items()):
+    for stream in (proc.stdout, proc.stderr):
       try:
         stream.close()
       except OSError:
         pass
-    if exceeded:
-      _stop_process(proc)
-    else:
-      try:
-        proc.wait(timeout=max(0.1, deadline - time.monotonic()))
-      except (OSError, subprocess.TimeoutExpired):
-        _stop_process(proc)
-        exceeded = True
-
-  if exceeded or proc.returncode != 0:
-    return None
-  return bytes(stdout)
 
 
 def hyprctl_json(args: list[str]) -> Any:
