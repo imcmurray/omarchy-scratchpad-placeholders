@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import stat
 import subprocess
 import sys
@@ -33,23 +34,99 @@ MAX_DESKTOP_TOTAL_BYTES = 1_048_576
 DESKTOP_SCAN_SEC = 1.5
 
 
+def _stop_process(proc: subprocess.Popen[bytes]) -> None:
+  if proc.poll() is None:
+    try:
+      proc.kill()
+    except OSError:
+      pass
+  try:
+    proc.wait(timeout=1)
+  except (OSError, subprocess.TimeoutExpired):
+    try:
+      proc.kill()
+      proc.wait(timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+      pass
+
+
 def run_hyprctl(args: list[str], timeout: float = HYPRCTL_TIMEOUT_SEC, max_bytes: int = HYPRCTL_MAX_BYTES) -> bytes | None:
   try:
-    result = subprocess.run(
+    proc = subprocess.Popen(
       ["hyprctl", *args],
-      capture_output=True,
-      timeout=timeout,
-      check=False,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      close_fds=True,
     )
-  except (OSError, subprocess.TimeoutExpired):
+  except OSError:
     return None
-  stdout = result.stdout or b""
-  stderr = result.stderr or b""
-  if len(stdout) > max_bytes or len(stderr) > max_bytes:
+  stdout = bytearray()
+  stderr = bytearray()
+  streams: dict[int, tuple[Any, bytearray]] = {}
+  if proc.stdout is not None:
+    os.set_blocking(proc.stdout.fileno(), False)
+    streams[proc.stdout.fileno()] = (proc.stdout, stdout)
+  if proc.stderr is not None:
+    os.set_blocking(proc.stderr.fileno(), False)
+    streams[proc.stderr.fileno()] = (proc.stderr, stderr)
+
+  deadline = time.monotonic() + timeout
+  exceeded = False
+  try:
+    while streams:
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        exceeded = True
+        break
+      try:
+        ready, _, _ = select.select(list(streams), [], [], remaining)
+      except (OSError, ValueError):
+        break
+      if not ready:
+        if proc.poll() is None:
+          continue
+        ready = list(streams)
+      for fd in list(ready):
+        handle = streams.get(fd)
+        if handle is None:
+          continue
+        stream, buf = handle
+        try:
+          chunk = os.read(fd, 8192)
+        except BlockingIOError:
+          continue
+        except OSError:
+          stream.close()
+          streams.pop(fd, None)
+          continue
+        if not chunk:
+          stream.close()
+          streams.pop(fd, None)
+          continue
+        buf.extend(chunk)
+        if len(stdout) > max_bytes or len(stderr) > max_bytes or (len(stdout) + len(stderr)) > max_bytes:
+          exceeded = True
+          break
+      if exceeded:
+        break
+  finally:
+    for fd, (stream, _) in list(streams.items()):
+      try:
+        stream.close()
+      except OSError:
+        pass
+    if exceeded:
+      _stop_process(proc)
+    else:
+      try:
+        proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+      except (OSError, subprocess.TimeoutExpired):
+        _stop_process(proc)
+        exceeded = True
+
+  if exceeded or proc.returncode != 0:
     return None
-  if result.returncode != 0:
-    return None
-  return stdout
+  return bytes(stdout)
 
 
 def hyprctl_json(args: list[str]) -> Any:
