@@ -561,6 +561,114 @@ def target_geometry(app: dict[str, Any]) -> dict[str, Any] | None:
   return out
 
 
+def float_on_arrival(client: dict[str, Any]) -> dict[str, Any]:
+  """Float a window the first time it turns up on the pad.
+
+  Hyprland tiles an arriving window, and on a pad of floating windows that
+  drops it in at full size underneath all of them -- there, but with no edge
+  left to grab. Float it so it lands in front and can be put somewhere.
+
+  Arrival means an address we did not see on the previous sync, not a slot we
+  have never met: sending a window to a slot that already exists is still an
+  arrival. Firing once per window leaves a pad deliberately re-tiled alone.
+  """
+  addr = str(client.get("address") or "")
+  if client.get("floating") or not addr:
+    return client
+  dispatch(
+    "hl.dsp.window.float({ action = 'enable', window = "
+    + lua_str("address:" + addr)
+    + " })"
+  )
+  time.sleep(0.2)
+  return client_by_address(addr) or client
+
+
+def app_key(app: dict[str, Any]) -> str:
+  return str(app.get("id") or app.get("class") or "")
+
+
+def next_id(cls: str, apps: list[dict[str, Any]]) -> str:
+  """Pick an id for a new slot of `cls`.
+
+  The first slot keeps the bare class as its id, so a scratchpad.json written
+  before slots existed keeps working with no migration.
+  """
+  used = {app_key(app) for app in apps}
+  if cls not in used:
+    return cls
+  n = 2
+  while f"{cls}#{n}" in used:
+    n += 1
+  return f"{cls}#{n}"
+
+
+def display_labels(apps: list[dict[str, Any]]) -> dict[str, str]:
+  """Number the tiles of a class that has more than one slot."""
+  counts: dict[str, int] = {}
+  for app in apps:
+    cls = str(app.get("class") or "")
+    counts[cls] = counts.get(cls, 0) + 1
+  seen: dict[str, int] = {}
+  labels: dict[str, str] = {}
+  for app in apps:
+    cls = str(app.get("class") or "")
+    seen[cls] = seen.get(cls, 0) + 1
+    name = str(app.get("name") or "App")
+    labels[app_key(app)] = name if counts.get(cls, 0) < 2 else f"{name} {seen[cls]}"
+  return labels
+
+
+def pair_apps(
+  apps: list[dict[str, Any]],
+  live: list[dict[str, Any]],
+  bindings: dict[str, str],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+  """Work out which remembered slot each live scratchpad window is.
+
+  Two windows of one class are interchangeable and Wayland offers nothing
+  stable to tell them apart across a reboot. So bind by remembered address
+  while the session lasts, and otherwise give each window the nearest saved
+  rectangle of its own class -- which is right precisely because identical
+  windows are interchangeable. Each slot is claimed at most once.
+  """
+  taken: dict[str, dict[str, Any]] = {}
+  by_id = {app_key(app): app for app in apps}
+
+  rest: list[dict[str, Any]] = []
+  for client in live:
+    wanted = bindings.get(str(client.get("address") or ""))
+    app = by_id.get(wanted) if wanted else None
+    if app is not None and app_key(app) not in taken:
+      taken[app_key(app)] = client
+    else:
+      rest.append(client)
+
+  leftover: list[dict[str, Any]] = []
+  for client in rest:
+    cls = client_class(client)
+    pool = [
+      app for app in apps
+      if str(app.get("class") or "") == cls and app_key(app) not in taken
+    ]
+    if not pool:
+      leftover.append(client)
+      continue
+    current = geometry_from_client(client)
+    taken[app_key(min(pool, key=lambda a: rect_distance(current, a)))] = client
+  return taken, leftover
+
+
+def rect_distance(current: dict[str, Any], app: dict[str, Any]) -> int:
+  geo = geometry_of(app)
+  if geo is None:
+    return 1 << 30
+  return (
+    abs(current["x"] - geo["x"]) + abs(current["y"] - geo["y"])
+    + abs(current["w"] - geo["w"]) + abs(current["h"] - geo["h"])
+  )
+
+
 def app_from_client(client: dict[str, Any], desktops: list[dict[str, str]]) -> dict[str, Any]:
   cls = str(client.get("class") or client.get("initialClass") or "")
   name, command, icon_name = command_for_client(client, desktops)
@@ -651,41 +759,62 @@ def sync() -> dict[str, Any]:
   apps = remembered()
   last = tracker()
 
+  arrived = [
+    client for client in live
+    if str(client.get("address") or "") not in last and not client.get("floating")
+  ]
+  if arrived:
+    for client in arrived:
+      float_on_arrival(client)
+    live = [
+      c for c in clients()
+      if str((c.get("workspace") or {}).get("name") or "") == WORKSPACE
+    ]
+    live_by_addr = {str(c.get("address") or ""): c for c in live if c.get("address")}
+
+  taken, unmatched = pair_apps(apps, live, last)
+
   # Tiled scratchpad windows reflow whenever a sibling leaves, and a restored
   # window is briefly wherever Hyprland first mapped it. Both look like a
   # layout change but neither is one, so only trust live geometry while every
-  # remembered app is actually on the pad. Otherwise a logout -- which closes
-  # the apps one by one -- would overwrite the layout we exist to restore.
-  live_classes_now = {str(c.get("class") or "") for c in live_by_addr.values()}
-  layout_whole = all(str(app.get("class") or "") in live_classes_now for app in apps)
+  # remembered slot is actually filled. Otherwise a logout -- which closes the
+  # apps one by one -- would overwrite the layout we exist to restore.
+  layout_whole = len(taken) == len(apps)
 
-  for client in live_by_addr.values():
+  for app in apps:
+    client = taken.get(app_key(app))
+    if client is None:
+      continue
     incoming = app_from_client(client, desktops)
-    existing = next((app for app in apps if app.get("class") == incoming["class"]), None)
-    if existing:
-      merge_app(existing, incoming, geometry=layout_whole)
-    elif len(apps) < MAX_APPS:
-      apps.append(incoming)
+    incoming["id"] = app_key(app)   # never let a second slot take the bare class
+    merge_app(app, incoming, geometry=layout_whole)
 
-  for addr, cls in last.items():
+  for client in unmatched:
+    if len(apps) >= MAX_APPS:
+      break
+    incoming = app_from_client(client, desktops)
+    incoming["id"] = next_id(str(incoming.get("class") or ""), apps)
+    apps.append(incoming)
+    taken[incoming["id"]] = client
+
+  for addr, ident in last.items():
     if addr in live_by_addr:
       continue
-    leftover = all_by_addr.get(addr)
-    if leftover is not None:
-      apps = [app for app in apps if app.get("class") != cls]
+    if all_by_addr.get(addr) is not None:
+      apps = [app for app in apps if app_key(app) != ident]
+      taken.pop(ident, None)
 
   save_remembered(apps)
-  save_tracker({addr: str(c.get("class") or "") for addr, c in live_by_addr.items()})
+  save_tracker({
+    str(client.get("address") or ""): ident
+    for ident, client in taken.items() if client.get("address")
+  })
 
-  live_classes = [str(c.get("class") or "") for c in live]
-  placeholders: list[dict[str, Any]] = []
-  remaining = list(live_classes)
-  for app in apps:
-    cls = str(app.get("class") or "")
-    if cls in remaining:
-      remaining.remove(cls)
-    elif len(placeholders) < MAX_APPS:
-      placeholders.append(app)
+  labels = display_labels(apps)
+  placeholders = [
+    dict(app, label=labels.get(app_key(app), app.get("name") or "App"))
+    for app in apps if app_key(app) not in taken
+  ]
 
   return {
     "visible": scratchpad_visible(),
@@ -699,16 +828,18 @@ def sync() -> dict[str, Any]:
 def snapshot() -> dict[str, Any]:
   desktops = desktop_entries()
   live = [c for c in clients() if str((c.get("workspace") or {}).get("name") or "") == WORKSPACE]
-  apps = []
-  seen = set()
+  apps: list[dict[str, Any]] = []
+  addresses: dict[str, str] = {}
   for client in live:
+    if len(apps) >= MAX_APPS:
+      break
     app = app_from_client(client, desktops)
-    if app["class"] in seen or len(apps) >= MAX_APPS:
-      continue
-    seen.add(app["class"])
+    app["id"] = next_id(str(app.get("class") or ""), apps)
     apps.append(app)
+    if client.get("address"):
+      addresses[str(client.get("address"))] = app["id"]
   save_remembered(apps)
-  save_tracker({str(c.get("address") or ""): str(c.get("class") or "") for c in live if c.get("address")})
+  save_tracker(addresses)
   return {"apps": apps, "count": len(apps)}
 
 
@@ -790,7 +921,17 @@ def apply_geometry(client: dict[str, Any], geo: dict[str, Any]) -> None:
   )
 
 
+def client_by_address(addr: str) -> dict[str, Any] | None:
+  return next((c for c in clients() if str(c.get("address") or "") == addr), None)
+
+
 def restore_geometry(cls: str, geo: dict[str, Any], known_addrs: set[str]) -> None:
+  """Wait for the window this launch produced, then hold it on its rectangle.
+
+  Track it by address once found. Re-finding it by class would, with a second
+  window of the same class already on the pad, hand this slot's rectangle to
+  whichever one happened to match first.
+  """
   deadline = time.time() + 15
   client = None
   while time.time() < deadline:
@@ -799,21 +940,20 @@ def restore_geometry(cls: str, geo: dict[str, Any], known_addrs: set[str]) -> No
       break
     time.sleep(0.15)
   if client is None:
-    client = find_app_window(cls)
-  if client is None:
     print(f"timed out waiting for {cls}", file=sys.stderr)
     return
+  addr = str(client.get("address") or "")
   for delay in (0.0, 0.25, 0.7, 1.5):
     if delay:
       time.sleep(delay)
-    current = find_app_window(cls) or client
+    current = client_by_address(addr) or client
     apply_geometry(current, geo)
-    current = find_app_window(cls) or current
+    current = client_by_address(addr) or current
     if geometry_matches(current, geo):
       return
 
 
-def reassert_layout(exclude_cls: str) -> None:
+def reassert_layout(exclude_id: str) -> None:
   """Snap the rest of the pad back onto the remembered arrangement.
 
   Tiled siblings reflow the moment a window leaves, so the scratchpad we are
@@ -822,22 +962,27 @@ def reassert_layout(exclude_cls: str) -> None:
   on whatever the tiler did while the app was gone. Floating a sibling reflows
   the ones still tiled, so make a second pass over anything left out of place.
   """
+  apps, taken = live_pairs()
   targets = []
-  for app in remembered():
-    cls = str(app.get("class") or "")
-    geo = target_geometry(app) if cls and cls != exclude_cls else None
-    if geo:
-      targets.append((cls, geo))
+  for app in apps:
+    if app_key(app) == exclude_id:
+      continue
+    client = taken.get(app_key(app))
+    geo = target_geometry(app) if client is not None else None
+    addr = str(client.get("address") or "") if client is not None else ""
+    if geo and addr:
+      targets.append((addr, geo))
   for _ in range(2):
     pending = []
-    for cls, geo in targets:
-      client = find_app_window(cls)
+    by_addr = {str(c.get("address") or ""): c for c in clients()}
+    for addr, geo in targets:
+      client = by_addr.get(addr)
       if client is None or str((client.get("workspace") or {}).get("name") or "") != WORKSPACE:
         continue
       if geometry_matches(client, geo):
         continue
       apply_geometry(client, geo)
-      pending.append((cls, geo))
+      pending.append((addr, geo))
     if not pending:
       return
     targets = pending
@@ -878,22 +1023,31 @@ def restore_one(app: dict[str, Any]) -> bool:
 
 def launch(app_id: str) -> int:
   apps = remembered()
-  app = next((item for item in apps if item.get("id") == app_id or item.get("class") == app_id), None)
+  app = next((item for item in apps if app_key(item) == app_id), None)
+  if app is None:
+    app = next((item for item in apps if item.get("class") == app_id), None)
   if not app:
     print(f"unknown scratchpad app: {app_id}", file=sys.stderr)
     return 1
   if not restore_one(app):
     return 1
-  reassert_layout(str(app.get("class") or ""))
+  reassert_layout(app_key(app))
   return 0
 
 
-def missing_apps() -> list[dict[str, Any]]:
-  live = {
-    client_class(client) for client in clients()
+def live_pairs() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+  apps = remembered()
+  live = [
+    client for client in clients()
     if str((client.get("workspace") or {}).get("name") or "") == WORKSPACE
-  }
-  return [app for app in remembered() if str(app.get("class") or "") not in live]
+  ]
+  taken, _ = pair_apps(apps, live, tracker())
+  return apps, taken
+
+
+def missing_apps() -> list[dict[str, Any]]:
+  apps, taken = live_pairs()
+  return [app for app in apps if app_key(app) not in taken]
 
 
 def restore_all() -> int:
@@ -915,7 +1069,7 @@ def restore_all() -> int:
 
 
 def forget(app_id: str) -> int:
-  apps = [app for app in remembered() if app.get("id") != app_id and app.get("class") != app_id]
+  apps = [app for app in remembered() if app_key(app) != app_id]
   save_remembered(apps)
   return 0
 
