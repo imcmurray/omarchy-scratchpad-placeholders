@@ -16,10 +16,21 @@ Item {
   property var placeholders: []
   property bool layoutFrozen: false
 
+  readonly property string missingSummary: {
+    var names = []
+    for (var i = 0; i < root.placeholders.length; i++)
+      names.push(root.placeholders[i].label || root.placeholders[i].name || "App")
+    if (names.length === 0) return ""
+    if (names.length === 1) return names[0] + " is missing"
+    if (names.length <= 3) return names.slice(0, -1).join(", ") + " and "
+                                  + names[names.length - 1] + " are missing"
+    return names.length + " apps are missing"
+  }
+
   readonly property int restorableCount: {
     var n = 0
     for (var i = 0; i < root.placeholders.length; i++)
-      if (root.placeholders[i].command) n++
+      if (root.placeholders[i].restorable) n++
     return n
   }
 
@@ -255,14 +266,47 @@ Item {
 
               Text {
                 width: parent.width
-                text: (modelData.w > 0 && modelData.h > 0)
-                      ? modelData.w + " × " + modelData.h
-                      : "Start"
+                text: !modelData.restorable
+                      ? "Can't be started"
+                      : (modelData.w > 0 && modelData.h > 0)
+                        ? modelData.w + " × " + modelData.h
+                        : "Start"
                 textFormat: Text.PlainText
-                color: Util.alpha(Color.popups.text, 0.55)
+                color: modelData.restorable ? Util.alpha(Color.popups.text, 0.55)
+                                            : Util.alpha(Color.urgent, 0.95)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 horizontalAlignment: Text.AlignHCenter
+              }
+            }
+
+            Rectangle {
+              id: dismiss
+              anchors { top: parent.top; right: parent.right; margins: Style.space(6) }
+              width: Style.space(22)
+              height: Style.space(22)
+              radius: width / 2
+              z: 2
+              visible: tileArea.containsMouse || dismissArea.containsMouse
+                       || !modelData.restorable
+              color: dismissArea.containsMouse ? Util.alpha(Color.urgent, 0.85)
+                                               : Util.alpha(Color.popups.text, 0.18)
+
+              Text {
+                anchors.centerIn: parent
+                text: "×"
+                textFormat: Text.PlainText
+                color: Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
+
+              MouseArea {
+                id: dismissArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.forgetApp(modelData.id || modelData.class)
               }
             }
 
@@ -275,7 +319,7 @@ Item {
               onClicked: function(mouse) {
                 if (mouse.button === Qt.RightButton)
                   root.forgetApp(modelData.id || modelData.class)
-                else if (modelData.command)
+                else if (modelData.restorable)
                   root.launchApp(modelData.id || modelData.class)
               }
             }
@@ -286,7 +330,8 @@ Item {
       Text {
         width: parent.width
         visible: root.layoutFrozen
-        text: "Moves aren't saved until every app is back."
+        text: root.missingSummary + " — moves aren't saved until every app is "
+              + "back. Dismiss a tile with × if you don't want it any more."
         textFormat: Text.PlainText
         color: Util.alpha(Color.popups.text, 0.5)
         font.family: Style.font.family

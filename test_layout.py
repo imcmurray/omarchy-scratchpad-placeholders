@@ -275,5 +275,44 @@ check("distinct names sharing a class are not numbered",
       sorted(layout.display_labels([plain, cliamp]).values()),
       ["Terminal", "cliamp"])
 
+
+# --- a tile that can never be started ------------------------------------
+# An app with no trusted command never fills its slot, so the pad is never
+# whole and geometry is never recorded again. That has to be visible.
+
+print("\nunrestorable tiles")
+
+mystery = {"id": "zzmystery", "name": "Mystery", "class": "zzmystery", "command": "",
+           "icon": "", "glyph": "g", "x": 10, "y": 10, "w": 400, "h": 300,
+           "floating": True, "monitor": "DP-2"}
+term = app("foot", (12, 38, 800, 600))
+term["command"] = "omarchy-launch-terminal"
+
+with Fake([term, mystery], [client("foot", (12, 38, 800, 600), "0xa")]) as f:
+  st = layout.sync()
+  flags = {p["id"]: p["restorable"] for p in st["placeholders"]}
+  check("a tile with no trusted command is flagged unrestorable", flags, {"zzmystery": False})
+  check("an unrestorable tile keeps the pad frozen", st["layoutFrozen"], True)
+
+with Fake([term, mystery], [client("foot", (999, 777, 500, 400), "0xa")]) as f:
+  layout.sync()
+  moved = next(a for a in f.saved if a["id"] == "foot")
+  check("a move is discarded while an unrestorable tile is remembered",
+        (moved["x"], moved["y"]), (12, 38))
+
+# acknowledging it is what unsticks tracking
+with Fake([term, mystery], [client("foot", (999, 777, 500, 400), "0xa")]) as f:
+  layout.forget("zzmystery")
+  layout.sync()
+  moved = next(a for a in f.saved if a["id"] == "foot")
+  check("acknowledging the tile resumes tracking",
+        (moved["x"], moved["y"]), (999, 777))
+
+with Fake([term, mystery], []) as f:
+  st = layout.sync()
+  check("a normal missing app is still restorable",
+        {p["id"]: p["restorable"] for p in st["placeholders"]},
+        {"foot": True, "zzmystery": False})
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

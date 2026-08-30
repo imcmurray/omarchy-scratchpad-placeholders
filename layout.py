@@ -896,9 +896,17 @@ def sync() -> dict[str, Any]:
     for ident, client in taken.items() if client.get("address")
   })
 
+  # A tile the plugin cannot start will never clear on its own, and while it
+  # is remembered the pad is never whole, so geometry is never recorded again.
+  # Say which tiles those are and let the user decide rather than quietly
+  # dropping them or quietly staying frozen.
   labels = display_labels(apps)
   placeholders = [
-    dict(app, label=labels.get(app_key(app), app.get("name") or "App"))
+    dict(
+      app,
+      label=labels.get(app_key(app), app.get("name") or "App"),
+      restorable=is_safe_command(str(app.get("command") or "")),
+    )
     for app in apps if app_key(app) not in taken
   ]
 
