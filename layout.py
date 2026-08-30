@@ -937,9 +937,29 @@ def tracker() -> dict[str, str]:
   return out
 
 
-def save_tracker(addresses: dict[str, str]) -> None:
+def tracked_rects() -> dict[str, list[int]]:
+  data = load_json(STATE_PATH, {}, STATE_MAX_BYTES)
+  rects = data.get("rects") if isinstance(data, dict) else None
+  out: dict[str, list[int]] = {}
+  if not isinstance(rects, dict):
+    return out
+  for key, value in rects.items():
+    if isinstance(value, list) and len(value) == 4:
+      try:
+        out[str(key)[:128]] = [int(v) for v in value]
+      except (TypeError, ValueError):
+        continue
+    if len(out) >= MAX_TRACKED:
+      break
+  return out
+
+
+def save_tracker(addresses: dict[str, str], rects: dict[str, list[int]] | None = None) -> None:
   trimmed = dict(list(addresses.items())[:MAX_TRACKED])
-  write_json(STATE_PATH, {"addresses": trimmed}, STATE_MAX_BYTES)
+  payload: dict[str, Any] = {"addresses": trimmed}
+  if rects is not None:
+    payload["rects"] = dict(list(rects.items())[:MAX_TRACKED])
+  write_json(STATE_PATH, payload, STATE_MAX_BYTES)
 
 
 def sync() -> dict[str, Any]:
@@ -967,6 +987,24 @@ def sync() -> dict[str, Any]:
 
   taken, unmatched = pair_apps(apps, live, last)
 
+  # A person moves one window at a time. Everything on the pad shifting between
+  # one poll and the next is something else doing it -- locking the session
+  # re-centres every floating window, and recording that would flatten the
+  # layout into a stack, which is the very thing this plugin exists to avoid.
+  was = tracked_rects()
+  now: dict[str, list[int]] = {}
+  moved: set[str] = set()
+  fresh: set[str] = set()
+  for ident, client in taken.items():
+    geo = geometry_from_client(client)
+    now[ident] = [geo["x"], geo["y"], geo["w"], geo["h"]]
+    before = was.get(ident)
+    if before is None:
+      fresh.add(ident)
+    elif before != now[ident]:
+      moved.add(ident)
+  shifted_together = len(taken) >= 2 and len(moved) == len(taken)
+
   # Tiled scratchpad windows reflow whenever a sibling leaves, and a restored
   # window is briefly wherever Hyprland first mapped it. Both look like a
   # layout change but neither is one, so only trust live geometry while every
@@ -980,9 +1018,19 @@ def sync() -> dict[str, Any]:
       continue
     incoming = app_from_client(client, desktops)
     incoming["id"] = app_key(app)   # never let a second slot take the bare class
+    # Only write a rectangle when this window is the one that just moved.
+    # Anything else and a rejected change would simply be recorded on the next
+    # poll instead, once it had stopped moving and become the status quo.
     # Recording where a window went to hide would make the hiding place the
     # thing we restore to, so keep the last rectangle that could be seen.
-    merge_app(app, incoming, geometry=layout_whole and not out_of_view(client))
+    ident = app_key(app)
+    trust = (
+      layout_whole
+      and not shifted_together
+      and not out_of_view(client)
+      and (ident in moved or ident in fresh)
+    )
+    merge_app(app, incoming, geometry=trust)
 
   for client in unmatched:
     if len(apps) >= MAX_APPS:
@@ -1000,10 +1048,14 @@ def sync() -> dict[str, Any]:
       taken.pop(ident, None)
 
   save_remembered(apps)
-  save_tracker({
-    str(client.get("address") or ""): ident
-    for ident, client in taken.items() if client.get("address")
-  })
+  save_tracker(
+    {
+      str(client.get("address") or ""): ident
+      for ident, client in taken.items() if client.get("address")
+    },
+    {ident: [geo["x"], geo["y"], geo["w"], geo["h"]]
+     for ident, geo in ((i, geometry_from_client(c)) for i, c in taken.items())},
+  )
 
   # A tile the plugin cannot start will never clear on its own, and while it
   # is remembered the pad is never whole, so geometry is never recorded again.
@@ -1032,6 +1084,7 @@ def sync() -> dict[str, Any]:
     "visible": scratchpad_visible(),
     "liveCount": len(live),
     "layoutFrozen": not layout_whole,
+    "shiftedTogether": shifted_together,
     "hidden": hidden[:MAX_APPS],
     "placeholders": placeholders[:MAX_APPS],
     "apps": apps[:MAX_APPS],

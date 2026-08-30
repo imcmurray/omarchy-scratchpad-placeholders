@@ -55,21 +55,24 @@ def app(cls, rect, monitor="DP-2"):
 class Fake:
   """Swap out everything that would otherwise shell out or touch disk."""
 
-  def __init__(self, apps, live, mons=(DP2,)):
+  def __init__(self, apps, live, mons=(DP2,), rects=None):
     self.saved = copy.deepcopy(apps)
     self.live = live
     self.mons = list(mons)
+    self.seen_rects = dict(rects or {})
 
   def __enter__(self):
     self.orig = {k: getattr(layout, k) for k in
                  ("monitors", "clients", "desktop_entries", "save_remembered",
-                  "save_tracker", "remembered", "tracker", "scratchpad_visible")}
+                  "save_tracker", "remembered", "tracker", "scratchpad_visible",
+                  "tracked_rects")}
     layout.monitors = lambda: self.mons
     layout.clients = lambda: self.live
     layout.desktop_entries = lambda: []
     layout.scratchpad_visible = lambda: True
     layout.tracker = lambda: {}
-    layout.save_tracker = lambda a: None
+    layout.tracked_rects = lambda: dict(self.seen_rects)
+    layout.save_tracker = lambda a, r=None: self.seen_rects.update(r or {})
     layout.remembered = lambda: copy.deepcopy(self.saved)
     layout.save_remembered = lambda apps: setattr(self, "saved", copy.deepcopy(apps))
     return self
@@ -444,6 +447,66 @@ with Fake([filled], [client("foot", (12, 38, 800, 600), "0xa")]):
   check("a slot with a live window counts as filled", layout.slot_is_filled(filled), True)
 with Fake([filled], []):
   check("an empty slot does not", layout.slot_is_filled(filled), False)
+
+
+# --- everything moving at once -------------------------------------------
+# Locking the session makes Hyprland re-centre every floating window. All of
+# them are present and all are on screen, so neither of the other guards
+# notices; recording it flattens the layout into a stack.
+
+print("\neverything moving at once")
+
+FOUR = {
+  "org.omarchy.btop": (12, 38, 846, 1390),
+  "foot":             (872, 38, 841, 688),
+  "chrome-gitlab":    (872, 740, 841, 688),
+  "md.obsidian.Obsidian": (1727, 38, 1701, 1390),
+}
+
+
+def centred(rect, mw=3440, mh=1440):
+  _, _, w, h = rect
+  return ((mw - w) // 2, (mh - h) // 2, w, h)
+
+
+four = [app(c, r) for c, r in FOUR.items()]
+baseline = {c: list(r) for c, r in FOUR.items()}
+
+with Fake(four, [client(c, centred(r), hex(i)) for i, (c, r) in enumerate(FOUR.items())],
+          rects=baseline) as f:
+  st = layout.sync()
+  check("a session lock re-centring everything is spotted", st["shiftedTogether"], True)
+  check("the layout survives the lock", f.rects(), FOUR)
+
+# one window dragged is a person, and must still be recorded
+one_moved = dict(FOUR, foot=(900, 100, 841, 688))
+with Fake(four, [client(c, r, hex(i)) for i, (c, r) in enumerate(one_moved.items())],
+          rects=baseline) as f:
+  st = layout.sync()
+  check("dragging one window is not mistaken for a lock", st["shiftedTogether"], False)
+  check("that drag is still recorded", f.rects()["foot"], (900, 100, 841, 688))
+
+# two of four is still a person rearranging, not the compositor
+two_moved = dict(FOUR, foot=(900, 100, 841, 688))
+two_moved["chrome-gitlab"] = (500, 500, 841, 688)
+with Fake(four, [client(c, r, hex(i)) for i, (c, r) in enumerate(two_moved.items())],
+          rects=baseline) as f:
+  layout.sync()
+  check("two drags in one interval are still recorded",
+        (f.rects()["foot"], f.rects()["chrome-gitlab"]),
+        ((900, 100, 841, 688), (500, 500, 841, 688)))
+
+# the poll after the lock: nothing is moving any more, and the centred
+# positions must still not become the remembered ones
+settled = {c: list(centred(r)) for c, r in FOUR.items()}
+with Fake(four, [client(c, centred(r), hex(i)) for i, (c, r) in enumerate(FOUR.items())],
+          rects=settled) as f:
+  layout.sync()
+  check("the poll after the lock does not record it either", f.rects(), FOUR)
+
+# with no baseline yet -- first sync after a restart -- record normally
+with Fake(four, [client(c, r, hex(i)) for i, (c, r) in enumerate(FOUR.items())]) as f:
+  check("no baseline yet is not treated as a shift", layout.sync()["shiftedTogether"], False)
 
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

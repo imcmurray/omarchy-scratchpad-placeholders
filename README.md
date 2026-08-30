@@ -37,6 +37,11 @@ No snapshot command. The plugin watches `special:scratchpad`:
 - **Layout changes** — while the app is still on the scratchpad, moving,
   resizing, or floating it updates the saved geometry. The next restore uses
   whatever you left it as, not the first size you happened to use.
+- **Only when one window moves** — a rectangle is saved for the window that
+  just moved, and only when it moved on its own. Locking the session makes
+  Hyprland re-centre every floating window at once; recording that would
+  flatten the layout into a stack of overlapping windows, which is exactly
+  what this plugin exists to prevent.
 - **Only while the set is whole** — geometry is recorded only when every
   remembered app is actually on the scratchpad. Tiled windows reflow the
   moment a neighbour leaves, and logging out closes them one at a time, so
