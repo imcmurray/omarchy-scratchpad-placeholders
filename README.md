@@ -6,7 +6,8 @@ placeholders.
 Anything you put on the scratchpad is remembered automatically. Move or
 resize those windows and the saved layout updates with them. Close an app or
 reboot, then open the scratchpad (`Super + S`) — a tile stands in for each
-missing app. Left-click relaunches it on the scratchpad in the last size and
+missing app. **Restore all** brings the whole arrangement back in one click;
+left-click a single tile to relaunch just that app in its last size and
 position. Right-click forgets it.
 
 This is not a notes pad and not a bar occupancy indicator. It restores the
@@ -23,12 +24,28 @@ No snapshot command. The plugin watches `special:scratchpad`:
 - **Layout changes** — while the app is still on the scratchpad, moving,
   resizing, or floating it updates the saved geometry. The next restore uses
   whatever you left it as, not the first size you happened to use.
+- **Only while the set is whole** — geometry is recorded only when every
+  remembered app is actually on the scratchpad. Tiled windows reflow the
+  moment a neighbour leaves, and logging out closes them one at a time, so
+  tracking that reflow would overwrite the layout with the shape the pad
+  collapsed into on the way down. Rearranging with a tile still missing is
+  therefore not saved, and the overlay says so while tracking is paused —
+  restore first, then arrange.
+- **Monitors** — a special workspace only ever lives on one monitor, so
+  remembered rectangles are translated onto whichever monitor the scratchpad
+  opens on and kept inside it. Unplug the screen a layout was saved on, or
+  restore onto a smaller one, and the windows are moved and shrunk to fit
+  rather than placed off the edge of the desk where nothing can reach them.
 - **Closed or after reboot** — if the app is gone, opening the scratchpad
   shows a placeholder tile instead of an empty drop-down.
 - **Moved off the scratchpad** — sending the live window to a normal
   workspace forgets it. The scratchpad is only for what you keep there.
-- **Restore** — left-click a tile to launch that app back onto the
-  scratchpad at the saved size and position. Right-click removes the tile.
+- **Restore** — **Restore all** relaunches every missing app, one at a
+  time so each lands under its own window rule. Left-click a single tile to
+  bring back just that app. Either way the whole pad is snapped back onto its
+  remembered geometry. Restored windows are floated, since
+  that is the only way to guarantee the exact rectangle. Right-click removes
+  the tile.
   Only apps matched to a desktop entry or a known Omarchy launcher can be
   restarted; a raw window class is never used as a command.
 
@@ -60,7 +77,8 @@ omarchy plugin list | grep ianm.scratchpad
 | --- | --- |
 | Toggle the scratchpad | `Super + S` |
 | Send the focused window to the scratchpad | `Super + Alt + S` |
-| Relaunch a remembered app | Left-click its tile |
+| Bring the whole scratchpad back | **Restore all** |
+| Relaunch one remembered app | Left-click its tile |
 | Forget a remembered app | Right-click its tile |
 
 Remembered apps are stored in `~/.config/omarchy/scratchpad.json`. Tracker
@@ -84,7 +102,11 @@ rm -f ~/.local/state/omarchy/scratchpad-tracker.json
 
 ```sh
 omarchy plugin validate .
+python3 test_layout.py
 ```
+
+`test_layout.py` runs against fake `hyprctl` data — it needs neither a live
+Hyprland nor the files under `~/.config`.
 
 The overlay entry point is `Main.qml`. Layout tracking and launch live in
 `layout.py`.

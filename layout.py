@@ -21,6 +21,8 @@ CONFIG_PATH = Path.home() / ".config/omarchy/scratchpad.json"
 STATE_PATH = Path.home() / ".local/state/omarchy/scratchpad-tracker.json"
 PLUGIN_DIR = Path(__file__).resolve().parent
 
+MIN_RESTORE_PX = 160
+MONITORS_TTL_SEC = 1.0
 HYPRCTL_TIMEOUT_SEC = 3
 HYPRCTL_MAX_BYTES = 1_048_576
 DISPATCH_MAX_BYTES = 4096
@@ -442,9 +444,24 @@ IDENTITY_KEYS = ("id", "name", "class", "command", "icon", "glyph")
 GEOMETRY_KEYS = ("x", "y", "w", "h", "floating", "monitor")
 
 
+_monitors_cache: tuple[float, list[dict[str, Any]]] | None = None
+
+
 def monitors() -> list[dict[str, Any]]:
+  """Monitor list, briefly cached.
+
+  Every client needs its monitor resolved, so an uncached read meant one
+  hyprctl per window on every poll. The TTL keeps a long-lived restore from
+  pinning a stale list if the pad moves screens mid-run.
+  """
+  global _monitors_cache
+  now = time.monotonic()
+  if _monitors_cache is not None and now - _monitors_cache[0] < MONITORS_TTL_SEC:
+    return _monitors_cache[1]
   payload = hyprctl_json(["monitors"])
-  return payload if isinstance(payload, list) else []
+  found = payload if isinstance(payload, list) else []
+  _monitors_cache = (now, found)
+  return found
 
 
 def monitor_for(client_or_name: Any) -> dict[str, Any] | None:
@@ -475,6 +492,28 @@ def geometry_from_client(client: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def scratchpad_monitor() -> dict[str, Any] | None:
+  """The monitor the scratchpad shows on -- a special workspace only has one."""
+  found = monitors()
+  for monitor in found:
+    if "scratchpad" in str((monitor.get("specialWorkspace") or {}).get("name") or ""):
+      return monitor
+  return next((m for m in found if m.get("focused")), found[0] if found else None)
+
+
+def monitor_bounds(monitor: dict[str, Any]) -> tuple[int, int, int, int] | None:
+  """Logical x, y, width, height -- client rects are in logical pixels."""
+  try:
+    scale = float(monitor.get("scale") or 1) or 1.0
+    width = int(int(monitor.get("width") or 0) / scale)
+    height = int(int(monitor.get("height") or 0) / scale)
+  except (TypeError, ValueError, ZeroDivisionError):
+    return None
+  if width <= 0 or height <= 0:
+    return None
+  return int(monitor.get("x") or 0), int(monitor.get("y") or 0), width, height
+
+
 def geometry_of(app: dict[str, Any]) -> dict[str, Any] | None:
   try:
     w = int(app.get("w") or 0)
@@ -493,6 +532,35 @@ def geometry_of(app: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def target_geometry(app: dict[str, Any]) -> dict[str, Any] | None:
+  """Remembered rect, moved onto the monitor the pad is on and kept inside it.
+
+  Hyprland places a floating window exactly where it is told, past the edge of
+  the desk included, so a rect saved on a wider screen -- or on a monitor that
+  has since been unplugged -- would otherwise restore into a window nobody can
+  see or reach. Undersized monitors shrink the window rather than lose it.
+  """
+  geo = geometry_of(app)
+  if geo is None:
+    return None
+  monitor = scratchpad_monitor()
+  bounds = monitor_bounds(monitor) if monitor else None
+  if monitor is None or bounds is None:
+    return geo
+  mx, my, mw, mh = bounds
+  saved = monitor_for(geo.get("monitor"))
+  out = dict(geo)
+  if saved is not None and str(saved.get("name") or "") != str(monitor.get("name") or ""):
+    out["x"] = out["x"] - int(saved.get("x") or 0) + mx
+    out["y"] = out["y"] - int(saved.get("y") or 0) + my
+  out["w"] = max(MIN_RESTORE_PX, min(out["w"], mw))
+  out["h"] = max(MIN_RESTORE_PX, min(out["h"], mh))
+  out["x"] = min(max(out["x"], mx), mx + mw - out["w"])
+  out["y"] = min(max(out["y"], my), my + mh - out["h"])
+  out["monitor"] = str(monitor.get("name") or out.get("monitor") or "")
+  return out
+
+
 def app_from_client(client: dict[str, Any], desktops: list[dict[str, str]]) -> dict[str, Any]:
   cls = str(client.get("class") or client.get("initialClass") or "")
   name, command, icon_name = command_for_client(client, desktops)
@@ -508,11 +576,13 @@ def app_from_client(client: dict[str, Any], desktops: list[dict[str, str]]) -> d
   return app
 
 
-def merge_app(existing: dict[str, Any], incoming: dict[str, Any]) -> None:
+def merge_app(existing: dict[str, Any], incoming: dict[str, Any], geometry: bool = True) -> None:
   for key in IDENTITY_KEYS:
     value = incoming.get(key)
     if value:
       existing[key] = value
+  if not geometry and geometry_of(existing) is not None:
+    return
   for key in GEOMETRY_KEYS:
     if key in incoming:
       existing[key] = incoming[key]
@@ -524,10 +594,7 @@ def clients() -> list[dict[str, Any]]:
 
 
 def scratchpad_visible() -> bool:
-  monitors = hyprctl_json(["monitors"])
-  if not isinstance(monitors, list):
-    return False
-  for monitor in monitors:
+  for monitor in monitors():
     special = monitor.get("specialWorkspace") or {}
     name = str(special.get("name") or "")
     if "scratchpad" in name:
@@ -584,11 +651,19 @@ def sync() -> dict[str, Any]:
   apps = remembered()
   last = tracker()
 
+  # Tiled scratchpad windows reflow whenever a sibling leaves, and a restored
+  # window is briefly wherever Hyprland first mapped it. Both look like a
+  # layout change but neither is one, so only trust live geometry while every
+  # remembered app is actually on the pad. Otherwise a logout -- which closes
+  # the apps one by one -- would overwrite the layout we exist to restore.
+  live_classes_now = {str(c.get("class") or "") for c in live_by_addr.values()}
+  layout_whole = all(str(app.get("class") or "") in live_classes_now for app in apps)
+
   for client in live_by_addr.values():
     incoming = app_from_client(client, desktops)
     existing = next((app for app in apps if app.get("class") == incoming["class"]), None)
     if existing:
-      merge_app(existing, incoming)
+      merge_app(existing, incoming, geometry=layout_whole)
     elif len(apps) < MAX_APPS:
       apps.append(incoming)
 
@@ -615,6 +690,7 @@ def sync() -> dict[str, Any]:
   return {
     "visible": scratchpad_visible(),
     "liveCount": len(live),
+    "layoutFrozen": not layout_whole,
     "placeholders": placeholders[:MAX_APPS],
     "apps": apps[:MAX_APPS],
   }
@@ -644,6 +720,9 @@ def dispatch(lua: str) -> bool:
   raw = run_hyprctl(["dispatch", lua], max_bytes=DISPATCH_MAX_BYTES)
   if raw is None:
     sys.stderr.write("dispatch failed\n")
+    return False
+  if raw.lstrip().lower().startswith(b"error"):
+    sys.stderr.write("dispatch rejected: " + raw.decode("utf-8", "replace")[:200] + "\n")
     return False
   return True
 
@@ -734,11 +813,44 @@ def restore_geometry(cls: str, geo: dict[str, Any], known_addrs: set[str]) -> No
       return
 
 
+def reassert_layout(exclude_cls: str) -> None:
+  """Snap the rest of the pad back onto the remembered arrangement.
+
+  Tiled siblings reflow the moment a window leaves, so the scratchpad we are
+  restoring into is rarely the one that was saved. Re-applying the remembered
+  geometry makes a restore land on the same arrangement every time instead of
+  on whatever the tiler did while the app was gone. Floating a sibling reflows
+  the ones still tiled, so make a second pass over anything left out of place.
+  """
+  targets = []
+  for app in remembered():
+    cls = str(app.get("class") or "")
+    geo = target_geometry(app) if cls and cls != exclude_cls else None
+    if geo:
+      targets.append((cls, geo))
+  for _ in range(2):
+    pending = []
+    for cls, geo in targets:
+      client = find_app_window(cls)
+      if client is None or str((client.get("workspace") or {}).get("name") or "") != WORKSPACE:
+        continue
+      if geometry_matches(client, geo):
+        continue
+      apply_geometry(client, geo)
+      pending.append((cls, geo))
+    if not pending:
+      return
+    targets = pending
+
+
 def exec_rules(app: dict[str, Any]) -> str:
   parts = ["workspace = 'special:scratchpad'"]
-  geo = geometry_of(app)
+  geo = target_geometry(app)
   if geo:
-    monitor = monitor_for(geo.get("monitor")) or {}
+    # A monitor rule is ignored once a workspace rule is set, and move is
+    # local to whichever monitor the special workspace opened on -- which is
+    # the monitor target_geometry already placed this rect on.
+    monitor = scratchpad_monitor() or {}
     local_x = geo["x"] - int(monitor.get("x") or 0)
     local_y = geo["y"] - int(monitor.get("y") or 0)
     parts.append("float = true")
@@ -747,24 +859,59 @@ def exec_rules(app: dict[str, Any]) -> str:
   return "{ " + ", ".join(parts) + " }"
 
 
+def restore_one(app: dict[str, Any]) -> bool:
+  """Start one remembered app and wait for it to settle on its saved rect."""
+  app_id = str(app.get("id") or app.get("class") or "?")
+  command = str(app.get("command") or "").strip()
+  if not command or not is_safe_command(command):
+    print(f"no trusted command for {app_id}", file=sys.stderr)
+    return False
+  cls = str(app.get("class") or "")
+  known_addrs = {str(client.get("address") or "") for client in clients() if client.get("address")}
+  if not dispatch("hl.dsp.exec_cmd(" + lua_str(command) + ", " + exec_rules(app) + ")"):
+    return False
+  geo = target_geometry(app)
+  if geo and cls:
+    restore_geometry(cls, geo, known_addrs)
+  return True
+
+
 def launch(app_id: str) -> int:
   apps = remembered()
   app = next((item for item in apps if item.get("id") == app_id or item.get("class") == app_id), None)
   if not app:
     print(f"unknown scratchpad app: {app_id}", file=sys.stderr)
     return 1
-  command = str(app.get("command") or "").strip()
-  if not command or not is_safe_command(command):
-    print(f"no trusted command for {app_id}", file=sys.stderr)
+  if not restore_one(app):
     return 1
-  cls = str(app.get("class") or "")
-  known_addrs = {str(client.get("address") or "") for client in clients() if client.get("address")}
-  if not dispatch("hl.dsp.exec_cmd(" + lua_str(command) + ", " + exec_rules(app) + ")"):
-    return 1
-  geo = geometry_of(app)
-  if geo and cls:
-    restore_geometry(cls, geo, known_addrs)
+  reassert_layout(str(app.get("class") or ""))
   return 0
+
+
+def missing_apps() -> list[dict[str, Any]]:
+  live = {
+    client_class(client) for client in clients()
+    if str((client.get("workspace") or {}).get("name") or "") == WORKSPACE
+  }
+  return [app for app in remembered() if str(app.get("class") or "") not in live]
+
+
+def restore_all() -> int:
+  """Bring back every remembered app that is not already on the pad.
+
+  Started one at a time on purpose: each app is placed by its own exec rule
+  as it maps, so launching them together would leave the rules racing over
+  which window belongs to which rectangle.
+  """
+  pending = missing_apps()
+  started: list[str] = []
+  skipped: list[str] = []
+  for app in pending:
+    name = str(app.get("name") or app.get("id") or "?")
+    (started if restore_one(app) else skipped).append(name)
+  reassert_layout("")
+  print(dump_status({"restored": started, "skipped": skipped, "total": len(pending)}))
+  return 0 if not skipped else 1
 
 
 def forget(app_id: str) -> int:
@@ -781,11 +928,13 @@ def main() -> int:
   if action == "snapshot":
     print(dump_status(snapshot()))
     return 0
+  if action == "restore-all":
+    return restore_all()
   if action == "launch" and len(sys.argv) > 2:
     return launch(sys.argv[2])
   if action == "forget" and len(sys.argv) > 2:
     return forget(sys.argv[2])
-  print("usage: layout.py status|snapshot|launch <id>|forget <id>", file=sys.stderr)
+  print("usage: layout.py status|snapshot|restore-all|launch <id>|forget <id>", file=sys.stderr)
   return 2
 
 

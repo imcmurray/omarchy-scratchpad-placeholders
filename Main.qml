@@ -14,6 +14,14 @@ Item {
   property var manifest: null
   property bool opened: false
   property var placeholders: []
+  property bool layoutFrozen: false
+
+  readonly property int restorableCount: {
+    var n = 0
+    for (var i = 0; i < root.placeholders.length; i++)
+      if (root.placeholders[i].command) n++
+    return n
+  }
 
   readonly property string pluginDir: {
     if (root.manifest && root.manifest.__sourceDir)
@@ -38,6 +46,10 @@ Item {
     refreshSoon.restart()
   }
 
+  function restoreAll() {
+    if (!restoreAllProcess.running) restoreAllProcess.running = true
+  }
+
   function forgetApp(appId) {
     Quickshell.execDetached(["python3", root.layoutScript, "forget", appId])
     refreshSoon.restart()
@@ -48,6 +60,7 @@ Item {
       var parsed = JSON.parse(String(raw || "{}"))
       var next = parsed.placeholders || []
       root.placeholders = next
+      root.layoutFrozen = parsed.layoutFrozen === true
       root.opened = parsed.visible === true && next.length > 0
     } catch (e) {
       console.warn("ianm.scratchpad", "bad status", e)
@@ -64,7 +77,7 @@ Item {
   }
 
   Timer {
-    interval: 1500
+    interval: 5000
     running: true
     repeat: true
     onTriggered: root.refresh()
@@ -80,6 +93,13 @@ Item {
           || name === "workspace")
         refreshSoon.restart()
     }
+  }
+
+  Process {
+    id: restoreAllProcess
+    running: false
+    command: ["python3", root.layoutScript, "restore-all"]
+    onExited: root.refresh()
   }
 
   Process {
@@ -123,6 +143,51 @@ Item {
         text: "Click to start an app you kept here. Right-click to forget."
         textFormat: Text.PlainText
         color: Util.alpha(Color.popups.text, 0.7)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+      }
+
+      BorderSurface {
+        id: restoreAll
+        visible: root.restorableCount > 1
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(parent.width, Style.space(300))
+        height: Style.space(46)
+        color: Util.alpha(Color.popups.text, restoreAllArea.containsMouse && !restoreAllProcess.running ? 0.24 : 0.12)
+        borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+        radius: Style.cornerRadius
+
+        Text {
+          anchors.centerIn: parent
+          text: restoreAllProcess.running
+                ? "Restoring…"
+                : "Restore all " + root.restorableCount + " apps"
+          textFormat: Text.PlainText
+          color: Util.alpha(Color.popups.text, restoreAllProcess.running ? 0.6 : 1.0)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          font.bold: true
+        }
+
+        MouseArea {
+          id: restoreAllArea
+          anchors.fill: parent
+          hoverEnabled: true
+          enabled: !restoreAllProcess.running
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.restoreAll()
+        }
+      }
+
+      Text {
+        width: parent.width
+        visible: root.layoutFrozen
+        text: "Layout tracking is paused while an app is missing — moves and "
+              + "resizes are not saved. Restore first, then arrange."
+        textFormat: Text.PlainText
+        color: Util.alpha(Color.popups.text, 0.55)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter

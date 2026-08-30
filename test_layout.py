@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Offline checks for the remembering and placement rules.
+
+Runs against fake hyprctl data, so it touches neither a live Hyprland nor the
+files under ~/.config. Run it with: python3 test_layout.py
+"""
+
+import copy
+import sys
+
+import layout
+
+PAD = "special:scratchpad"
+DP2 = {"id": 0, "name": "DP-2", "x": 0, "y": 0, "width": 3440, "height": 1440,
+       "scale": 1, "focused": True, "specialWorkspace": {"name": PAD}}
+SMALL = {"id": 1, "name": "eDP-1", "x": 0, "y": 0, "width": 1920, "height": 1080,
+         "scale": 1, "focused": True, "specialWorkspace": {"name": PAD}}
+RIGHT = {"id": 2, "name": "HDMI-A-1", "x": 3440, "y": 0, "width": 1920,
+         "height": 1080, "scale": 1, "focused": True,
+         "specialWorkspace": {"name": PAD}}
+# same DP-2, but the pad is showing on the monitor to its right
+DP2_IDLE = dict(DP2, focused=False, specialWorkspace={"name": ""})
+
+LAYOUT = {
+  "org.omarchy.btop": (12, 38, 846, 1390),
+  "foot": (872, 38, 841, 688),
+  "chrome-gitlab": (872, 740, 841, 688),
+  "md.obsidian.Obsidian": (1727, 38, 1701, 1390),
+}
+
+results = []
+
+
+def check(name, got, want):
+  ok = got == want
+  results.append(ok)
+  print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+  if not ok:
+    print(f"        got  {got}\n        want {want}")
+
+
+def client(cls, rect, addr="0x1", workspace=PAD, monitor=0):
+  x, y, w, h = rect
+  return {"class": cls, "address": addr, "at": [x, y], "size": [w, h],
+          "floating": False, "monitor": monitor, "workspace": {"name": workspace}}
+
+
+def app(cls, rect, monitor="DP-2"):
+  x, y, w, h = rect
+  return {"id": cls, "name": cls, "class": cls, "command": "true", "icon": "",
+          "glyph": "g", "x": x, "y": y, "w": w, "h": h, "floating": False,
+          "monitor": monitor}
+
+
+class Fake:
+  """Swap out everything that would otherwise shell out or touch disk."""
+
+  def __init__(self, apps, live, mons=(DP2,)):
+    self.saved = copy.deepcopy(apps)
+    self.live = live
+    self.mons = list(mons)
+
+  def __enter__(self):
+    self.orig = {k: getattr(layout, k) for k in
+                 ("monitors", "clients", "desktop_entries", "save_remembered",
+                  "save_tracker", "remembered", "tracker", "scratchpad_visible")}
+    layout.monitors = lambda: self.mons
+    layout.clients = lambda: self.live
+    layout.desktop_entries = lambda: []
+    layout.scratchpad_visible = lambda: True
+    layout.tracker = lambda: {}
+    layout.save_tracker = lambda a: None
+    layout.remembered = lambda: copy.deepcopy(self.saved)
+    layout.save_remembered = lambda apps: setattr(self, "saved", copy.deepcopy(apps))
+    return self
+
+  def __exit__(self, *a):
+    for k, v in self.orig.items():
+      setattr(layout, k, v)
+
+  def rects(self):
+    return {a["class"]: (a["x"], a["y"], a["w"], a["h"]) for a in self.saved}
+
+
+# --- the bug this all started with ---------------------------------------
+# Closing one tiled window reflows the survivors. Recording that reflow is
+# what flattened the remembered layout into a stack of near-identical rects.
+
+print("\nremembering")
+
+apps = [app(c, r) for c, r in LAYOUT.items()]
+live = [client(c, r, hex(i)) for i, (c, r) in enumerate(LAYOUT.items())]
+with Fake(apps, live) as f:
+  layout.sync()
+  check("a whole pad records live geometry", f.rects(), LAYOUT)
+
+with Fake(apps, live) as f:
+  moved = dict(LAYOUT, foot=(900, 100, 841, 688))
+  f.live = [client(c, r, hex(i)) for i, (c, r) in enumerate(moved.items())]
+  layout.sync()
+  check("a move on a whole pad is recorded", f.rects()["foot"], (900, 100, 841, 688))
+
+with Fake(apps, live) as f:
+  alive = list(LAYOUT)
+  while alive:
+    alive.pop(0)
+    # survivors reflow into one wide column, as they do live
+    f.live = [client(c, (12, 38 + i * 300, 3416, 300), hex(i))
+              for i, c in enumerate(alive)]
+    for _ in range(3):          # the poller fires repeatedly per close
+      layout.sync()
+  check("logging out 4 -> 0 keeps the layout", f.rects(), LAYOUT)
+
+with Fake(apps, []) as f:
+  alive = []
+  for c in LAYOUT:
+    alive.append(c)
+    f.live = [client(x, LAYOUT[x], hex(i)) for i, x in enumerate(alive)]
+    for _ in range(3):
+      layout.sync()
+  check("restoring 0 -> 4 keeps the layout", f.rects(), LAYOUT)
+
+with Fake(apps, live) as f:
+  f.live = live + [client("org.new", (100, 100, 400, 400), "0xnew")]
+  layout.sync()
+  check("a new app is recorded with its geometry",
+        f.rects().get("org.new"), (100, 100, 400, 400))
+
+with Fake(apps, live[:2]) as f:
+  layout.sync()
+  check("a gap in the pad reports layoutFrozen", layout.sync()["layoutFrozen"], True)
+
+with Fake(apps, live) as f:
+  check("a whole pad reports layoutFrozen false", layout.sync()["layoutFrozen"], False)
+
+
+# --- placement ------------------------------------------------------------
+# Hyprland puts a floating window exactly where it is told, off-desk included.
+
+print("\nplacement")
+
+def target(rect, mons, saved_monitor="DP-2"):
+  with Fake([], [], mons):
+    geo = layout.target_geometry(app("x", rect, saved_monitor))
+    return (geo["x"], geo["y"], geo["w"], geo["h"])
+
+check("a rect that already fits is untouched",
+      target((872, 38, 841, 688), (DP2,)), (872, 38, 841, 688))
+check("a rect past the right edge is pulled back on",
+      target((3200, 38, 841, 688), (DP2,)), (2599, 38, 841, 688))
+check("a window wider than the screen is shrunk to fit",
+      target((0, 0, 5000, 3000), (SMALL,)), (0, 0, 1920, 1080))
+check("an unplugged monitor's rect lands on the one that is left",
+      target((1727, 38, 1701, 1390), (SMALL,)), (219, 0, 1701, 1080))
+check("a pad on a second monitor gets rects translated onto it",
+      target((12, 38, 846, 800), (DP2_IDLE, RIGHT)), (3452, 38, 846, 800))
+check("a rect too tall for the second monitor is shrunk there",
+      target((12, 38, 846, 1390), (DP2_IDLE, RIGHT)), (3452, 0, 846, 1080))
+check("a tiny rect keeps a grabbable size",
+      target((0, 0, 10, 10), (DP2,)), (0, 0, 160, 160))
+
+with Fake([], [], (DP2_IDLE, RIGHT)):
+  # translated to global 3452,38 on HDMI-A-1, then expressed local to it
+  rules = layout.exec_rules(app("x", (12, 38, 846, 800), "DP-2"))
+  check("exec rules use monitor-local coordinates",
+        "move = {12, 38}" in rules, True)
+  check("exec rules float the window", "float = true" in rules, True)
+
+print(f"\n{sum(results)}/{len(results)} passed")
+sys.exit(0 if all(results) else 1)
