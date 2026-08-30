@@ -236,5 +236,44 @@ with Fake([app("foot", (12, 38, 800, 600))],
   check("an old config still matches its window",
         [a["id"] for a in f.saved], ["foot"])
 
+
+# --- a program running inside a terminal ---------------------------------
+# If cliamp was playing, the user wants cliamp back, not a bare prompt.
+
+print("\nrunning programs")
+
+def tui_app(slot, cls, name, command, rect=(10, 10, 400, 300)):
+  x, y, w, h = rect
+  return {"id": slot, "name": name, "class": cls, "command": command, "icon": "",
+          "glyph": "g", "x": x, "y": y, "w": w, "h": h, "floating": True,
+          "monitor": "DP-2"}
+
+
+cliamp = tui_app("foot#2", "foot", "cliamp", "omarchy-launch-tui cliamp")
+plain = tui_app("foot", "foot", "Terminal", "omarchy-launch-terminal")
+
+check("a remembered TUI restores under its own app-id",
+      layout.restore_class(cliamp), "org.omarchy.cliamp")
+check("a plain terminal keeps its own class",
+      layout.restore_class(plain), "foot")
+check("a slot answers to both classes while it is still a terminal",
+      layout.app_classes(cliamp), {"foot", "org.omarchy.cliamp"})
+check("the launcher command stays inside the existing allowlist",
+      layout.is_safe_command(cliamp["command"]), True)
+check("a detected name that is not a safe slug is refused",
+      layout.is_safe_command("omarchy-launch-tui ../evil"), False)
+
+# once restored, the window really is org.omarchy.cliamp and the entry converges
+converged = dict(cliamp, **{"class": "org.omarchy.cliamp"})
+check("a converged slot no longer answers to the terminal class",
+      layout.app_classes(converged), {"org.omarchy.cliamp"})
+
+check("two identical names are numbered",
+      sorted(layout.display_labels([plain, dict(plain, id="foot#3")]).values()),
+      ["Terminal 1", "Terminal 2"])
+check("distinct names sharing a class are not numbered",
+      sorted(layout.display_labels([plain, cliamp]).values()),
+      ["Terminal", "cliamp"])
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import signal
 import stat
 import subprocess
@@ -34,6 +35,10 @@ MAX_TRACKED = 64
 MAX_DESKTOP_FILES = 400
 MAX_DESKTOP_FILE_BYTES = 32_768
 MAX_DESKTOP_TOTAL_BYTES = 1_048_576
+PROC_COMM_MAX_BYTES = 256
+PROC_CHILDREN_MAX_BYTES = 4096
+PROC_SCAN_MAX = 32
+PROC_SCAN_DEPTH = 4
 DESKTOP_SCAN_SEC = 1.5
 
 
@@ -339,6 +344,78 @@ SAFE_EXACT_COMMANDS = {
 }
 
 
+TERMINAL_CLASSES = {"foot", "alacritty", "kitty", "com.mitchellh.ghostty"}
+# Things a terminal runs on the way to the program you actually care about.
+SHELL_COMMS = {
+  "bash", "zsh", "fish", "sh", "dash", "ash", "ksh",
+  "tmux", "screen", "login", "su", "sudo", "env",
+}
+
+
+def proc_field(pid: str, name: str, max_bytes: int) -> str:
+  return (read_regular_file(Path("/proc") / pid / name, max_bytes) or "").strip()
+
+
+def running_tui(pid: Any) -> str:
+  """The program a terminal is actually running, if we can name it safely.
+
+  Take the shallowest non-shell descendant, not the deepest: a terminal
+  running `claude` reads bash -> claude -> bash -> python3, and the bottom of
+  that is meaningless. The name has to pass TUI_SLUG and exist on PATH, so
+  what gets remembered is the same `omarchy-launch-tui <slug>` form that
+  `is_safe_command` already trusts -- no new kind of command becomes runnable.
+  """
+  try:
+    root = str(int(pid))
+  except (TypeError, ValueError):
+    return ""
+  frontier = [root]
+  seen = 0
+  for _ in range(PROC_SCAN_DEPTH):
+    nxt: list[str] = []
+    for parent in frontier:
+      kids = proc_field(parent, f"task/{parent}/children", PROC_CHILDREN_MAX_BYTES)
+      for kid in kids.split():
+        if not kid.isdigit():
+          continue
+        seen += 1
+        if seen > PROC_SCAN_MAX:
+          return ""
+        comm = proc_field(kid, "comm", PROC_COMM_MAX_BYTES)
+        if not comm:
+          continue
+        if comm in SHELL_COMMS:
+          nxt.append(kid)
+          continue
+        if TUI_SLUG.fullmatch(comm) and shutil.which(comm):
+          return comm
+        return ""
+    if not nxt:
+      break
+    frontier = nxt
+  return ""
+
+
+def restore_class(app: dict[str, Any]) -> str:
+  """The class the window will have once we relaunch it.
+
+  A program noticed inside a plain terminal is remembered as the Omarchy
+  launcher for it, and that launcher gives the window its own app-id. So the
+  window that comes back is not the class we originally saw it under.
+  Derived rather than stored, so it cannot go stale when the command changes.
+  """
+  command = str(app.get("command") or "")
+  if command.startswith("omarchy-launch-tui "):
+    slug = command.split(" ", 1)[1]
+    if TUI_SLUG.fullmatch(slug):
+      return "org.omarchy." + slug
+  return str(app.get("class") or "")
+
+
+def app_classes(app: dict[str, Any]) -> set[str]:
+  return {str(app.get("class") or ""), restore_class(app)} - {""}
+
+
 def sanitize_name(value: str) -> str:
   cleaned = "".join(ch for ch in str(value or "") if ch.isprintable() and ch not in "<>")
   cleaned = " ".join(cleaned.split())
@@ -404,7 +481,12 @@ def command_for_client(client: dict[str, Any], desktops: list[dict[str, str]]) -
 
   if "obsidian" in lowered:
     return "Obsidian", "uwsm-app -- obsidian", "obsidian"
-  if lowered in {"foot", "alacritty", "kitty", "com.mitchellh.ghostty"}:
+  if lowered in TERMINAL_CLASSES:
+    # Something running in the terminal is what the user wants back, so
+    # remember it the Omarchy way rather than as a bare shell.
+    slug = running_tui(client.get("pid"))
+    if slug:
+      return sanitize_name(slug), "omarchy-launch-tui " + slug, "utilities-terminal"
     return "Terminal", "omarchy-launch-terminal", "foot"
 
   cls_lower = lowered
@@ -604,18 +686,22 @@ def next_id(cls: str, apps: list[dict[str, Any]]) -> str:
 
 
 def display_labels(apps: list[dict[str, Any]]) -> dict[str, str]:
-  """Number the tiles of a class that has more than one slot."""
+  """Number only the tiles a user could not otherwise tell apart.
+
+  Count by displayed name rather than by class: a terminal running something
+  recognisable is already named for it, so two slots sharing the class `foot`
+  can still read Terminal and cliamp with nothing to disambiguate.
+  """
   counts: dict[str, int] = {}
   for app in apps:
-    cls = str(app.get("class") or "")
-    counts[cls] = counts.get(cls, 0) + 1
+    name = str(app.get("name") or "App")
+    counts[name] = counts.get(name, 0) + 1
   seen: dict[str, int] = {}
   labels: dict[str, str] = {}
   for app in apps:
-    cls = str(app.get("class") or "")
-    seen[cls] = seen.get(cls, 0) + 1
     name = str(app.get("name") or "App")
-    labels[app_key(app)] = name if counts.get(cls, 0) < 2 else f"{name} {seen[cls]}"
+    seen[name] = seen.get(name, 0) + 1
+    labels[app_key(app)] = name if counts.get(name, 0) < 2 else f"{name} {seen[name]}"
   return labels
 
 
@@ -649,7 +735,7 @@ def pair_apps(
     cls = client_class(client)
     pool = [
       app for app in apps
-      if str(app.get("class") or "") == cls and app_key(app) not in taken
+      if cls in app_classes(app) and app_key(app) not in taken
     ]
     if not pool:
       leftover.append(client)
@@ -1011,7 +1097,7 @@ def restore_one(app: dict[str, Any]) -> bool:
   if not command or not is_safe_command(command):
     print(f"no trusted command for {app_id}", file=sys.stderr)
     return False
-  cls = str(app.get("class") or "")
+  cls = restore_class(app)
   known_addrs = {str(client.get("address") or "") for client in clients() if client.get("address")}
   if not dispatch("hl.dsp.exec_cmd(" + lua_str(command) + ", " + exec_rules(app) + ")"):
     return False
