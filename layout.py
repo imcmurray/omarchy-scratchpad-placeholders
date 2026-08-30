@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import contextlib
+import fcntl
 import selectors
 import shutil
 import signal
@@ -20,6 +22,7 @@ from typing import Any
 WORKSPACE = "special:scratchpad"
 CONFIG_PATH = Path.home() / ".config/omarchy/scratchpad.json"
 STATE_PATH = Path.home() / ".local/state/omarchy/scratchpad-tracker.json"
+LOCK_PATH = Path.home() / ".local/state/omarchy/scratchpad-launch.lock"
 PLUGIN_DIR = Path(__file__).resolve().parent
 
 MIN_RESTORE_PX = 160
@@ -1214,6 +1217,49 @@ def exec_rules(app: dict[str, Any]) -> str:
   return "{ " + ", ".join(parts) + " }"
 
 
+@contextlib.contextmanager
+def launch_lock() -> Any:
+  """Hold the right to start things, or yield False if someone else has it.
+
+  A launch is slow -- up to fifteen seconds waiting for a window to appear --
+  and until that window exists nothing can tell that the slot is being filled.
+  Two launches racing therefore both believe the slot is empty and both start
+  an app, leaving a duplicate window and a spare slot behind for good. Held
+  across the whole launch, including the wait, so the second one is turned
+  away rather than deciding for itself.
+  """
+  fd = -1
+  try:
+    if not ensure_parent(LOCK_PATH):
+      yield False
+      return
+    try:
+      fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+      fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+      if fd >= 0:
+        os.close(fd)
+        fd = -1
+      yield False
+      return
+    yield True
+  finally:
+    if fd >= 0:
+      try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+      except OSError:
+        pass
+      try:
+        os.close(fd)
+      except OSError:
+        pass
+
+
+def slot_is_filled(app: dict[str, Any]) -> bool:
+  _, taken = live_pairs()
+  return app_key(app) in taken
+
+
 def restore_one(app: dict[str, Any]) -> bool:
   """Start one remembered app and wait for it to settle on its saved rect."""
   app_id = str(app.get("id") or app.get("class") or "?")
@@ -1239,9 +1285,18 @@ def launch(app_id: str) -> int:
   if not app:
     print(f"unknown scratchpad app: {app_id}", file=sys.stderr)
     return 1
-  if not restore_one(app):
-    return 1
-  reassert_layout(app_key(app))
+  with launch_lock() as held:
+    if not held:
+      print(f"another restore is already running; ignoring {app_id}", file=sys.stderr)
+      return 1
+    # Starting a slot that already has a window would leave the extra one
+    # unmatched, and the next sync would remember it as a slot of its own.
+    if slot_is_filled(app):
+      print(f"{app_id} is already on the scratchpad", file=sys.stderr)
+      return 0
+    if not restore_one(app):
+      return 1
+    reassert_layout(app_key(app))
   return 0
 
 
@@ -1267,13 +1322,17 @@ def restore_all() -> int:
   as it maps, so launching them together would leave the rules racing over
   which window belongs to which rectangle.
   """
-  pending = missing_apps()
-  started: list[str] = []
-  skipped: list[str] = []
-  for app in pending:
-    name = str(app.get("name") or app.get("id") or "?")
-    (started if restore_one(app) else skipped).append(name)
-  reassert_layout("")
+  with launch_lock() as held:
+    if not held:
+      print("another restore is already running", file=sys.stderr)
+      return 1
+    pending = missing_apps()
+    started: list[str] = []
+    skipped: list[str] = []
+    for app in pending:
+      name = str(app.get("name") or app.get("id") or "?")
+      (started if restore_one(app) else skipped).append(name)
+    reassert_layout("")
   print(dump_status({"restored": started, "skipped": skipped, "total": len(pending)}))
   return 0 if not skipped else 1
 

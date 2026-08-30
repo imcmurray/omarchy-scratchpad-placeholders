@@ -53,9 +53,25 @@ Item {
     if (!statusProcess.running) statusProcess.running = true
   }
 
+  // A launch is detached and slow, and the tile stays put until its window
+  // exists, so an impatient second click used to start the app twice. The
+  // helper turns the duplicate away now, but there is no reason to fire it.
+  property var launching: ({})
+
   function launchApp(appId) {
+    if (root.launching[appId]) return
+    var pending = root.launching
+    pending[appId] = true
+    root.launching = pending
     Quickshell.execDetached(["python3", root.layoutScript, "launch", appId])
     refreshSoon.restart()
+  }
+
+  function clearLaunching(appId) {
+    if (!root.launching[appId]) return
+    var pending = root.launching
+    delete pending[appId]
+    root.launching = pending
   }
 
   function restoreAll() {
@@ -75,6 +91,12 @@ Item {
     try {
       var parsed = JSON.parse(String(raw || "{}"))
       var next = parsed.placeholders || []
+      // a tile whose window has arrived is no longer starting
+      var stillMissing = {}
+      for (var i = 0; i < next.length; i++)
+        stillMissing[next[i].id || next[i].class] = true
+      for (var key in root.launching)
+        if (!stillMissing[key]) root.clearLaunching(key)
       root.placeholders = next
       root.layoutFrozen = parsed.layoutFrozen === true
       root.hidden = parsed.hidden || []
@@ -322,11 +344,13 @@ Item {
 
               Text {
                 width: parent.width
-                text: !modelData.restorable
-                      ? "Can't be started"
-                      : (modelData.w > 0 && modelData.h > 0)
-                        ? modelData.w + " × " + modelData.h
-                        : "Start"
+                text: root.launching[modelData.id || modelData.class]
+                      ? "Starting…"
+                      : !modelData.restorable
+                        ? "Can't be started"
+                        : (modelData.w > 0 && modelData.h > 0)
+                          ? modelData.w + " × " + modelData.h
+                          : "Start"
                 textFormat: Text.PlainText
                 color: modelData.restorable ? Util.alpha(Color.popups.text, 0.55)
                                             : Util.alpha(Color.urgent, 0.95)
@@ -371,7 +395,8 @@ Item {
               anchors.fill: parent
               hoverEnabled: true
               acceptedButtons: Qt.LeftButton | Qt.RightButton
-              cursorShape: Qt.PointingHandCursor
+              cursorShape: root.launching[modelData.id || modelData.class]
+                           ? Qt.BusyCursor : Qt.PointingHandCursor
               onClicked: function(mouse) {
                 if (mouse.button === Qt.RightButton)
                   root.forgetApp(modelData.id || modelData.class)
