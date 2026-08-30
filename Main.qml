@@ -243,7 +243,7 @@ Item {
 
               Text {
                 width: parent.width
-                text: modelData.name || "App"
+                text: modelData.label || modelData.name || "App"
                 textFormat: Text.PlainText
                 color: Color.popups.text
                 font.family: Style.font.family

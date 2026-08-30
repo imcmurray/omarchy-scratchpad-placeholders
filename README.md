@@ -21,6 +21,13 @@ No snapshot command. The plugin watches `special:scratchpad`:
 
 - **New window** — sending an app to the scratchpad (`Super + Alt + S`) adds
   it to the remembered set: name, launch command, icon, size, and position.
+  It is floated as it arrives, because Hyprland otherwise tiles it in at full
+  size underneath the windows already there, leaving no edge to grab.
+- **More than one of the same app** — two terminals kept on the scratchpad are
+  remembered as two slots, each with its own rectangle, and restore to their
+  own places rather than on top of each other. Identical windows are matched
+  to slots by whichever saved rectangle is nearest, since nothing about a
+  window survives a reboot to tell two of them apart.
 - **Layout changes** — while the app is still on the scratchpad, moving,
   resizing, or floating it updates the saved geometry. The next restore uses
   whatever you left it as, not the first size you happened to use.

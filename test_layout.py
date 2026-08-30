@@ -166,5 +166,75 @@ with Fake([], [], (DP2_IDLE, RIGHT)):
         "move = {12, 38}" in rules, True)
   check("exec rules float the window", "float = true" in rules, True)
 
+
+# --- two windows of the same class ---------------------------------------
+# They are interchangeable and Wayland gives nothing stable to tell them
+# apart across a reboot, so slots are matched by nearest saved rectangle.
+
+print("\nsame-class slots")
+
+TERMS = {"foot": (12, 38, 800, 600), "foot#2": (900, 38, 800, 600)}
+
+
+def term_app(slot, rect):
+  x, y, w, h = rect
+  return {"id": slot, "name": "Terminal", "class": "foot", "command": "true",
+          "icon": "", "glyph": "g", "x": x, "y": y, "w": w, "h": h,
+          "floating": False, "monitor": "DP-2"}
+
+
+two = [term_app(k, v) for k, v in TERMS.items()]
+
+with Fake([], [client("foot", TERMS["foot"], "0xa"),
+               client("foot", TERMS["foot#2"], "0xb")]) as f:
+  f.saved = []
+  layout.sync()
+  check("two same-class windows become two slots",
+        sorted(a["id"] for a in f.saved), ["foot", "foot#2"])
+
+with Fake(two, [client("foot", TERMS["foot"], "0xa"),
+                client("foot", TERMS["foot#2"], "0xb")]) as f:
+  layout.sync()
+  check("each slot keeps its own rectangle",
+        {a["id"]: (a["x"], a["y"], a["w"], a["h"]) for a in f.saved}, TERMS)
+
+# the same two windows, reported in the opposite order and with fresh
+# addresses, as after a reboot -- nearest rectangle still sorts them out
+with Fake(two, [client("foot", TERMS["foot#2"], "0xz"),
+                client("foot", TERMS["foot"], "0xy")]) as f:
+  layout.sync()
+  check("slots survive windows arriving in a different order",
+        {a["id"]: (a["x"], a["y"], a["w"], a["h"]) for a in f.saved}, TERMS)
+
+# one of the two closes: the survivor must not steal the other's slot
+with Fake(two, [client("foot", TERMS["foot#2"], "0xb")]) as f:
+  st = layout.sync()
+  check("one of two closing leaves one placeholder",
+        [p["id"] for p in st["placeholders"]], ["foot"])
+  check("one of two closing freezes tracking", st["layoutFrozen"], True)
+  check("the survivor keeps its own rectangle",
+        {a["id"]: (a["x"], a["y"], a["w"], a["h"]) for a in f.saved}, TERMS)
+
+with Fake(two, []) as f:
+  st = layout.sync()
+  check("both closed gives two distinguishable tiles",
+        [p["label"] for p in st["placeholders"]], ["Terminal 1", "Terminal 2"])
+
+with Fake([app("foot", (12, 38, 800, 600))], []) as f:
+  st = layout.sync()
+  check("a lone slot is not numbered", [p["label"] for p in st["placeholders"]], ["foot"])
+
+with Fake(two, []) as f:
+  layout.forget("foot#2")
+  check("forgetting one slot leaves the other",
+        [a["id"] for a in f.saved], ["foot"])
+
+# a config written before slots existed keys on the bare class
+with Fake([app("foot", (12, 38, 800, 600))],
+          [client("foot", (12, 38, 800, 600), "0xa")]) as f:
+  layout.sync()
+  check("an old config still matches its window",
+        [a["id"] for a in f.saved], ["foot"])
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
