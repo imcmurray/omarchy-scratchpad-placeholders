@@ -66,7 +66,9 @@ No snapshot command. The plugin watches `special:scratchpad`:
 - **Moved off the scratchpad** — sending the live window to a normal
   workspace forgets it. The scratchpad is only for what you keep there.
 - **Restore** — **Restore all** relaunches every missing app, one at a
-  time so each lands under its own window rule. Left-click a single tile to
+  time so each lands under its own window rule. Only one restore runs at a
+  time: a tile shows `Starting…` while its app is on the way, and an
+  impatient second click cannot start a second copy. Left-click a single tile to
   bring back just that app. Either way the whole pad is snapped back onto its
   remembered geometry. Restored windows are floated, since
   that is the only way to guarantee the exact rectangle. Right-click removes

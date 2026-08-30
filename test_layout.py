@@ -416,5 +416,34 @@ check("a sliver is clamped back to a grabbable size",
       layout.clamp_rect({"x": 10, "y": 10, "w": 2, "h": 2}, (0, 0, 3440, 1440)),
       {"x": 10, "y": 10, "w": 160, "h": 160})
 
+
+# --- two launches racing --------------------------------------------------
+# A launch waits up to fifteen seconds for its window, and until that window
+# exists nothing can see the slot is being filled.
+
+print("\nracing launches")
+
+import tempfile as _tf
+from pathlib import Path as _Path
+_lockdir = _tf.mkdtemp()
+_real_lock = layout.LOCK_PATH
+layout.LOCK_PATH = _Path(_lockdir) / "launch.lock"
+try:
+  with layout.launch_lock() as first:
+    check("the first launch takes the lock", first, True)
+    with layout.launch_lock() as second:
+      check("a second launch is turned away while it is held", second, False)
+  with layout.launch_lock() as again:
+    check("the lock is released afterwards", again, True)
+finally:
+  layout.LOCK_PATH = _real_lock
+
+# and the slot-filled guard, for a click on a tile whose window came back
+filled = app("foot", (12, 38, 800, 600))
+with Fake([filled], [client("foot", (12, 38, 800, 600), "0xa")]):
+  check("a slot with a live window counts as filled", layout.slot_is_filled(filled), True)
+with Fake([filled], []):
+  check("an empty slot does not", layout.slot_is_filled(filled), False)
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
