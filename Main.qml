@@ -15,6 +15,7 @@ Item {
   property bool opened: false
   property var placeholders: []
   property bool layoutFrozen: false
+  property var hidden: []
 
   readonly property string missingSummary: {
     var names = []
@@ -61,6 +62,10 @@ Item {
     if (!restoreAllProcess.running) restoreAllProcess.running = true
   }
 
+  function revealHidden() {
+    if (!revealProcess.running) revealProcess.running = true
+  }
+
   function forgetApp(appId) {
     Quickshell.execDetached(["python3", root.layoutScript, "forget", appId])
     refreshSoon.restart()
@@ -72,7 +77,9 @@ Item {
       var next = parsed.placeholders || []
       root.placeholders = next
       root.layoutFrozen = parsed.layoutFrozen === true
-      root.opened = parsed.visible === true && next.length > 0
+      root.hidden = parsed.hidden || []
+      root.opened = parsed.visible === true
+                    && (next.length > 0 || root.hidden.length > 0)
     } catch (e) {
       console.warn("ianm.scratchpad", "bad status", e)
     }
@@ -110,6 +117,13 @@ Item {
     id: restoreAllProcess
     running: false
     command: ["python3", root.layoutScript, "restore-all"]
+    onExited: root.refresh()
+  }
+
+  Process {
+    id: revealProcess
+    running: false
+    command: ["python3", root.layoutScript, "reveal"]
     onExited: root.refresh()
   }
 
@@ -160,6 +174,48 @@ Item {
         font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
+      }
+
+      BorderSurface {
+        id: hiddenWarning
+        visible: root.hidden.length > 0
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(parent.width, Style.space(460))
+        height: Style.space(52)
+        color: Util.alpha(Color.urgent, revealArea.containsMouse ? 0.34 : 0.20)
+        borderSpec: Border.surfaceSpec("popups", "border", Color.urgent, Math.max(1, Style.space(2)))
+        radius: Style.cornerRadius
+
+        Text {
+          anchors.centerIn: parent
+          width: parent.width - Style.space(24)
+          text: {
+            var names = []
+            for (var i = 0; i < root.hidden.length; i++) names.push(root.hidden[i].label)
+            var who = names.length <= 3 ? names.join(", ") : root.hidden.length + " windows"
+            return revealProcess.running
+                   ? "Bringing them back…"
+                   : who + (names.length === 1 ? " is" : " are")
+                     + " running out of sight — click to bring "
+                     + (names.length === 1 ? "it" : "them") + " back"
+          }
+          textFormat: Text.PlainText
+          color: Color.popups.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          horizontalAlignment: Text.AlignHCenter
+          wrapMode: Text.WordWrap
+        }
+
+        MouseArea {
+          id: revealArea
+          anchors.fill: parent
+          hoverEnabled: true
+          enabled: !revealProcess.running
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.revealHidden()
+        }
       }
 
       BorderSurface {

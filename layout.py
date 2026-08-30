@@ -23,6 +23,7 @@ STATE_PATH = Path.home() / ".local/state/omarchy/scratchpad-tracker.json"
 PLUGIN_DIR = Path(__file__).resolve().parent
 
 MIN_RESTORE_PX = 160
+MIN_VISIBLE_PX = 48
 MONITORS_TTL_SEC = 1.0
 HYPRCTL_TIMEOUT_SEC = 3
 HYPRCTL_MAX_BYTES = 1_048_576
@@ -690,6 +691,36 @@ def geometry_of(app: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def clamp_rect(geo: dict[str, Any], bounds: tuple[int, int, int, int]) -> dict[str, Any]:
+  """Pull a rectangle onto the monitor and keep it big enough to grab."""
+  mx, my, mw, mh = bounds
+  out = dict(geo)
+  out["w"] = max(MIN_RESTORE_PX, min(out["w"], mw))
+  out["h"] = max(MIN_RESTORE_PX, min(out["h"], mh))
+  out["x"] = min(max(out["x"], mx), mx + mw - out["w"])
+  out["y"] = min(max(out["y"], my), my + mh - out["h"])
+  return out
+
+
+def out_of_view(client: dict[str, Any]) -> bool:
+  """Whether too little of a window shows to notice it is there.
+
+  A client cannot move itself under Wayland, but anything running as this
+  user can ask Hyprland to, so a window on the pad can be parked off the edge
+  of the desk or shrunk to a sliver and carry on running unseen. Treat both
+  the same way: too little showing on either axis to see or grab.
+  """
+  monitor = scratchpad_monitor()
+  bounds = monitor_bounds(monitor) if monitor else None
+  if bounds is None:
+    return False
+  mx, my, mw, mh = bounds
+  geo = geometry_from_client(client)
+  shown_x = min(geo["x"] + geo["w"], mx + mw) - max(geo["x"], mx)
+  shown_y = min(geo["y"] + geo["h"], my + mh) - max(geo["y"], my)
+  return shown_x < MIN_VISIBLE_PX or shown_y < MIN_VISIBLE_PX
+
+
 def target_geometry(app: dict[str, Any]) -> dict[str, Any] | None:
   """Remembered rect, moved onto the monitor the pad is on and kept inside it.
 
@@ -711,10 +742,7 @@ def target_geometry(app: dict[str, Any]) -> dict[str, Any] | None:
   if saved is not None and str(saved.get("name") or "") != str(monitor.get("name") or ""):
     out["x"] = out["x"] - int(saved.get("x") or 0) + mx
     out["y"] = out["y"] - int(saved.get("y") or 0) + my
-  out["w"] = max(MIN_RESTORE_PX, min(out["w"], mw))
-  out["h"] = max(MIN_RESTORE_PX, min(out["h"], mh))
-  out["x"] = min(max(out["x"], mx), mx + mw - out["w"])
-  out["y"] = min(max(out["y"], my), my + mh - out["h"])
+  out = clamp_rect(out, bounds)
   out["monitor"] = str(monitor.get("name") or out.get("monitor") or "")
   return out
 
@@ -949,7 +977,9 @@ def sync() -> dict[str, Any]:
       continue
     incoming = app_from_client(client, desktops)
     incoming["id"] = app_key(app)   # never let a second slot take the bare class
-    merge_app(app, incoming, geometry=layout_whole)
+    # Recording where a window went to hide would make the hiding place the
+    # thing we restore to, so keep the last rectangle that could be seen.
+    merge_app(app, incoming, geometry=layout_whole and not out_of_view(client))
 
   for client in unmatched:
     if len(apps) >= MAX_APPS:
@@ -986,10 +1016,20 @@ def sync() -> dict[str, Any]:
     for app in apps if app_key(app) not in taken
   ]
 
+  hidden = []
+  for app in apps:
+    client = taken.get(app_key(app))
+    if client is not None and out_of_view(client):
+      hidden.append({
+        "id": app_key(app),
+        "label": labels.get(app_key(app), app.get("name") or "App"),
+      })
+
   return {
     "visible": scratchpad_visible(),
     "liveCount": len(live),
     "layoutFrozen": not layout_whole,
+    "hidden": hidden[:MAX_APPS],
     "placeholders": placeholders[:MAX_APPS],
     "apps": apps[:MAX_APPS],
   }
@@ -1238,6 +1278,26 @@ def restore_all() -> int:
   return 0 if not skipped else 1
 
 
+def reveal() -> int:
+  """Bring scratchpad windows that are out of view back onto the monitor."""
+  monitor = scratchpad_monitor()
+  bounds = monitor_bounds(monitor) if monitor else None
+  if bounds is None:
+    print("no monitor to reveal onto", file=sys.stderr)
+    return 1
+  apps, taken = live_pairs()
+  labels = display_labels(apps)
+  revealed: list[str] = []
+  for app in apps:
+    client = taken.get(app_key(app))
+    if client is None or not out_of_view(client):
+      continue
+    apply_geometry(client, clamp_rect(geometry_from_client(client), bounds))
+    revealed.append(labels.get(app_key(app), str(app.get("name") or "App")))
+  print(dump_status({"revealed": revealed}))
+  return 0
+
+
 def forget(app_id: str) -> int:
   apps = [app for app in remembered() if app_key(app) != app_id]
   save_remembered(apps)
@@ -1254,11 +1314,16 @@ def main() -> int:
     return 0
   if action == "restore-all":
     return restore_all()
+  if action == "reveal":
+    return reveal()
   if action == "launch" and len(sys.argv) > 2:
     return launch(sys.argv[2])
   if action == "forget" and len(sys.argv) > 2:
     return forget(sys.argv[2])
-  print("usage: layout.py status|snapshot|restore-all|launch <id>|forget <id>", file=sys.stderr)
+  print(
+    "usage: layout.py status|snapshot|restore-all|reveal|launch <id>|forget <id>",
+    file=sys.stderr,
+  )
   return 2
 
 
