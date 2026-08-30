@@ -57,6 +57,12 @@ No snapshot command. The plugin watches `special:scratchpad`:
   rather than placed off the edge of the desk where nothing can reach them.
 - **Closed or after reboot** — if the app is gone, opening the scratchpad
   shows a placeholder tile instead of an empty drop-down.
+- **Out of sight** — a window cannot move itself, but anything running as you
+  can ask Hyprland to move it, so a scratchpad window can be parked off the
+  edge of the desk or shrunk to a sliver and keep running unseen. Those are
+  named when you open the scratchpad, with one click to bring them back, and
+  where a window went to hide is never recorded as the place to restore it
+  to. The scratchpad opens to say so even when nothing is missing.
 - **Moved off the scratchpad** — sending the live window to a normal
   workspace forgets it. The scratchpad is only for what you keep there.
 - **Restore** — **Restore all** relaunches every missing app, one at a

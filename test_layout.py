@@ -377,5 +377,44 @@ finally:
 check("plantable() clears a system binary",
       layout.plantable("/usr/bin/env"), False)
 
+
+# --- windows hiding on the pad -------------------------------------------
+# A client cannot move itself, but anything running as this user can ask
+# Hyprland to, so a window can be parked off the desk and keep running unseen.
+
+print("\nhiding on the pad")
+
+PAD_MON = (DP2,)
+seen = app("foot", (12, 38, 800, 600))
+
+def hidden_check(rect):
+  with Fake([seen], [client("foot", rect, "0xa")], PAD_MON):
+    return layout.out_of_view(client("foot", rect, "0xa"))
+
+check("a window on screen is not flagged", hidden_check((12, 38, 800, 600)), False)
+check("a window parked off the right edge is flagged", hidden_check((6000, 300, 400, 300)), True)
+check("a window parked below the desk is flagged", hidden_check((300, 5000, 400, 300)), True)
+check("a window shrunk to a sliver is flagged", hidden_check((300, 300, 2, 2)), True)
+check("a window mostly off-screen but still grabbable is left alone",
+      hidden_check((3300, 300, 400, 300)), False)
+
+with Fake([seen], [client("foot", (6000, 3000, 400, 300), "0xa")], PAD_MON) as f:
+  st = layout.sync()
+  check("a hidden window is reported", [h["id"] for h in st["hidden"]], ["foot"])
+  kept = next(a for a in f.saved if a["id"] == "foot")
+  check("its hiding place is not remembered",
+        (kept["x"], kept["y"], kept["w"], kept["h"]), (12, 38, 800, 600))
+
+with Fake([seen], [client("foot", (12, 38, 800, 600), "0xa")], PAD_MON) as f:
+  check("nothing is reported when everything is visible", layout.sync()["hidden"], [])
+
+# revealing pulls it back onto the monitor
+check("a hidden rect clamps back onto the desk",
+      layout.clamp_rect({"x": 6000, "y": 3000, "w": 400, "h": 300}, (0, 0, 3440, 1440)),
+      {"x": 3040, "y": 1140, "w": 400, "h": 300})
+check("a sliver is clamped back to a grabbable size",
+      layout.clamp_rect({"x": 10, "y": 10, "w": 2, "h": 2}, (0, 0, 3440, 1440)),
+      {"x": 10, "y": 10, "w": 160, "h": 160})
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)
