@@ -42,8 +42,14 @@ No snapshot command. The plugin watches `special:scratchpad`:
   moment a neighbour leaves, and logging out closes them one at a time, so
   tracking that reflow would overwrite the layout with the shape the pad
   collapsed into on the way down. Rearranging with a tile still missing is
-  therefore not saved, and the overlay says so while tracking is paused —
-  restore first, then arrange.
+  therefore not saved. The overlay names the apps that are missing while
+  tracking is paused, so restore them first or dismiss the tiles you no
+  longer want with the × in their corner.
+- **Apps that cannot be restarted** — only apps matched to a desktop entry or
+  a known Omarchy launcher can be relaunched, so a tile the plugin has no
+  trusted command for says `Can't be started` rather than doing nothing when
+  clicked. It will never fill its own slot, so it holds tracking paused until
+  it is dismissed — which is left to you rather than decided for you.
 - **Monitors** — a special workspace only ever lives on one monitor, so
   remembered rectangles are translated onto whichever monitor the scratchpad
   opens on and kept inside it. Unplug the screen a layout was saved on, or
