@@ -23,6 +23,12 @@ No snapshot command. The plugin watches `special:scratchpad`:
   it to the remembered set: name, launch command, icon, size, and position.
   It is floated as it arrives, because Hyprland otherwise tiles it in at full
   size underneath the windows already there, leaving no edge to grab.
+- **A program running in a terminal** — a terminal with something running in
+  it is remembered as that program, not as a bare shell, and comes back
+  through the matching Omarchy launcher. Leave `cliamp` playing and the tile
+  says cliamp; restore it and cliamp is playing again. Only names that are a
+  plain lowercase command on `PATH` are used, so what gets remembered is the
+  same `omarchy-launch-tui` form the plugin already trusts.
 - **More than one of the same app** — two terminals kept on the scratchpad are
   remembered as two slots, each with its own rectangle, and restore to their
   own places rather than on top of each other. Identical windows are matched
