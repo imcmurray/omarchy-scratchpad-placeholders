@@ -115,7 +115,9 @@ Item {
   PanelWindow {
     id: panel
     visible: root.opened
-    color: "transparent"
+    // Without this the title, caption and footnote are alpha text on whatever
+    // wallpaper happens to be up, and legibility is pot luck.
+    color: Util.alpha(Color.background, 0.62)
     anchors { top: true; bottom: true; left: true; right: true }
     exclusionMode: ExclusionMode.Ignore
     WlrLayershell.namespace: "omarchy-scratchpad-placeholders"
@@ -140,7 +142,7 @@ Item {
 
       Text {
         width: parent.width
-        text: "Click to start an app you kept here. Right-click to forget."
+        text: "Right-click a tile to forget it."
         textFormat: Text.PlainText
         color: Util.alpha(Color.popups.text, 0.7)
         font.family: Style.font.family
@@ -155,7 +157,10 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         width: Math.min(parent.width, Style.space(300))
         height: Style.space(46)
-        color: Util.alpha(Color.popups.text, restoreAllArea.containsMouse && !restoreAllProcess.running ? 0.24 : 0.12)
+        color: restoreAllProcess.running ? Util.alpha(Color.accent, 0.10)
+             : restoreAllArea.pressed     ? Util.alpha(Color.accent, 0.52)
+             : restoreAllArea.containsMouse ? Util.alpha(Color.accent, 0.44)
+             : Util.alpha(Color.accent, 0.30)
         borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
         radius: Style.cornerRadius
 
@@ -181,19 +186,6 @@ Item {
         }
       }
 
-      Text {
-        width: parent.width
-        visible: root.layoutFrozen
-        text: "Layout tracking is paused while an app is missing — moves and "
-              + "resizes are not saved. Restore first, then arrange."
-        textFormat: Text.PlainText
-        color: Util.alpha(Color.popups.text, 0.55)
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.WordWrap
-      }
-
       Flow {
         id: tiles
         width: parent.width
@@ -211,6 +203,14 @@ Item {
             color: Util.alpha(Color.popups.background, 0.92)
             borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
             radius: Style.cornerRadius
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              visible: tileArea.containsMouse
+              color: tileArea.pressed ? Style.pressedFillFor(Color.popups.text, Color.accent)
+                                      : Style.hoverFillFor(Color.popups.text, Color.accent)
+            }
 
             Column {
               anchors.fill: parent
@@ -255,7 +255,9 @@ Item {
 
               Text {
                 width: parent.width
-                text: "Start"
+                text: (modelData.w > 0 && modelData.h > 0)
+                      ? modelData.w + " × " + modelData.h
+                      : "Start"
                 textFormat: Text.PlainText
                 color: Util.alpha(Color.popups.text, 0.55)
                 font.family: Style.font.family
@@ -265,6 +267,7 @@ Item {
             }
 
             MouseArea {
+              id: tileArea
               anchors.fill: parent
               hoverEnabled: true
               acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -278,6 +281,18 @@ Item {
             }
           }
         }
+      }
+
+      Text {
+        width: parent.width
+        visible: root.layoutFrozen
+        text: "Moves aren't saved until every app is back."
+        textFormat: Text.PlainText
+        color: Util.alpha(Color.popups.text, 0.5)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
       }
     }
   }
