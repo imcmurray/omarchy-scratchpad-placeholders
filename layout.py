@@ -304,11 +304,41 @@ def desktop_entries() -> list[dict[str, str]]:
   return entries
 
 
+ICON_ROOTS = [
+  Path.home() / ".local/share/icons",
+  Path("/usr/share/icons"),
+  Path("/usr/share/pixmaps"),
+]
+
+
+def under_icon_root(candidate: Path) -> str:
+  """Absolute path of `candidate`, but only if it sits inside an icon tree.
+
+  Icon names come from .desktop files and from the remembered config, so they
+  are not ours. The overlay hands whatever comes back to an Image, and a name
+  like ../../../../etc/hostname would otherwise walk straight out of the icon
+  directories.
+  """
+  try:
+    resolved = candidate.resolve(strict=True)
+  except (OSError, RuntimeError):
+    return ""
+  if not resolved.is_file():
+    return ""
+  for root in ICON_ROOTS:
+    try:
+      resolved.relative_to(root.resolve(strict=False))
+    except ValueError:
+      continue
+    return str(resolved)
+  return ""
+
+
 def resolve_icon(name: str) -> str:
   if not name:
     return ""
-  if name.startswith("/") and Path(name).is_file():
-    return name
+  if name.startswith("/"):
+    return under_icon_root(Path(name))
   stems = [name, Path(name).stem]
   roots = [
     Path.home() / ".local/share/icons/hicolor",
@@ -320,15 +350,15 @@ def resolve_icon(name: str) -> str:
     for root in roots:
       if root.name == "pixmaps":
         for ext in (".png", ".svg", ".xpm"):
-          candidate = root / f"{stem}{ext}"
-          if candidate.is_file():
-            return str(candidate)
+          found = under_icon_root(root / f"{stem}{ext}")
+          if found:
+            return found
         continue
       for size in sizes:
         for ext in (".png", ".svg"):
-          candidate = root / size / "apps" / f"{stem}{ext}"
-          if candidate.is_file():
-            return str(candidate)
+          found = under_icon_root(root / size / "apps" / f"{stem}{ext}")
+          if found:
+            return found
   return ""
 
 
@@ -356,14 +386,60 @@ def proc_field(pid: str, name: str, max_bytes: int) -> str:
   return (read_regular_file(Path("/proc") / pid / name, max_bytes) or "").strip()
 
 
+def plantable(path: str) -> bool:
+  """Whether this account could swap the binary at `path` for another one."""
+  return os.access(path, os.W_OK) or os.access(os.path.dirname(path) or "/", os.W_OK)
+
+
+def trusted_slug(slug: str) -> bool:
+  """A name with nothing corroborating it, so only trust an unplantable target.
+
+  A window class is chosen entirely by the window. Restoring resolves the name
+  through PATH, and this PATH has several directories this account can write
+  to, so a window claiming to be `org.omarchy.<name>` could otherwise point
+  the tile at a binary the same attacker had just dropped there.
+  """
+  found = shutil.which(slug)
+  return bool(found) and not plantable(found)
+
+
+def names_its_own_binary(pid: str, comm: str) -> bool:
+  """Whether `comm` is what this process actually is.
+
+  A process can call itself anything, so the name alone is a claim. Where the
+  binary can be read, require PATH to resolve to the very same one -- that
+  catches a process calling itself `btop` while being something else.
+
+  Where it cannot be read, fall back to requiring an unplantable target. A
+  process can make itself unreadable at will (prctl), so an unreadable binary
+  is not evidence of anything; but btop and friends carry capabilities and are
+  legitimately unreadable, and refusing them outright would quietly downgrade
+  a real TUI to a bare shell.
+
+  Restoring a user-writable binary that is genuinely running is allowed on
+  purpose: that is the feature, and it runs what was already running.
+  """
+  found = shutil.which(comm)
+  if not found:
+    return False
+  try:
+    running = os.readlink(f"/proc/{pid}/exe")
+  except OSError:
+    return not plantable(found)
+  try:
+    return os.path.samefile(running, found)
+  except OSError:
+    return False
+
+
 def running_tui(pid: Any) -> str:
   """The program a terminal is actually running, if we can name it safely.
 
   Take the shallowest non-shell descendant, not the deepest: a terminal
   running `claude` reads bash -> claude -> bash -> python3, and the bottom of
-  that is meaningless. The name has to pass TUI_SLUG and exist on PATH, so
-  what gets remembered is the same `omarchy-launch-tui <slug>` form that
-  `is_safe_command` already trusts -- no new kind of command becomes runnable.
+  that is meaningless. The name has to pass TUI_SLUG and be the binary that
+  process really is, so what gets remembered is the same
+  `omarchy-launch-tui <slug>` form `is_safe_command` already trusts.
   """
   try:
     root = str(int(pid))
@@ -387,7 +463,7 @@ def running_tui(pid: Any) -> str:
         if comm in SHELL_COMMS:
           nxt.append(kid)
           continue
-        if TUI_SLUG.fullmatch(comm) and shutil.which(comm):
+        if TUI_SLUG.fullmatch(comm) and names_its_own_binary(kid, comm):
           return comm
         return ""
     if not nxt:
@@ -404,7 +480,7 @@ def restore_class(app: dict[str, Any]) -> str:
   window that comes back is not the class we originally saw it under.
   Derived rather than stored, so it cannot go stale when the command changes.
   """
-  command = str(app.get("command") or "")
+  command = str(app.get("command") or "").strip()
   if command.startswith("omarchy-launch-tui "):
     slug = command.split(" ", 1)[1]
     if TUI_SLUG.fullmatch(slug):
@@ -475,7 +551,7 @@ def command_for_client(client: dict[str, Any], desktops: list[dict[str, str]]) -
       return "Agent", "omarchy-agent", "utilities-terminal"
     if slug == "btop":
       return "Activity", "omarchy-launch-tui btop", "utilities-system-monitor"
-    if TUI_SLUG.fullmatch(slug):
+    if TUI_SLUG.fullmatch(slug) and trusted_slug(slug):
       return sanitize_name(slug), "omarchy-launch-tui " + slug, "utilities-terminal"
     return sanitize_name(title or slug or cls), "", ""
 

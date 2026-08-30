@@ -66,7 +66,10 @@ No snapshot command. The plugin watches `special:scratchpad`:
   that is the only way to guarantee the exact rectangle. Right-click removes
   the tile.
   Only apps matched to a desktop entry or a known Omarchy launcher can be
-  restarted; a raw window class is never used as a command.
+  restarted; a raw window class is never used as a command. A window names
+  its own class, so where a class does select a launcher the target must be a
+  binary this account cannot replace — a window cannot point a tile at
+  something dropped in a writable part of `PATH`.
 
 Requires **Omarchy 4** (Quattro) and Python 3. The helper uses only the
 standard library plus `hyprctl`.
