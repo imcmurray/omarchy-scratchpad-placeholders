@@ -13,7 +13,7 @@ position. Right-click forgets it.
 This is not a notes pad and not a bar occupancy indicator. It restores the
 apps you actually kept on the Hyprland scratchpad.
 
-![Scratchpad placeholder tiles for GitLab, Terminal, Obsidian, and Activity](preview.png)
+![The scratchpad overlay after a reboot: a Restore all button above placeholder tiles for GitLab, Terminal, Obsidian and Activity, each showing the size it will come back at](preview.png)
 
 ## How it remembers
 
